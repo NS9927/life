@@ -210,6 +210,98 @@
     "type": "bool",
     "default": true
   },
+  "proactive": {
+    "description": "主动开口（没人问也自己找话题）。★默认关闭：enable=false 或 session_list 为空时零副作用——不解析时间线、不起后台循环、不调 LLM。设计灵感来自第三方插件 astrbot_plugin_virtual_life 的「一天时间线 + 可打扰度」体系（只借鉴参数体系，代码自研）",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用主动开口（★默认关闭）",
+        "type": "bool",
+        "default": false
+      },
+      "session_list": {
+        "description": "只对这些会话生效（unified_msg_origin）。留空 = 不生效（保守）",
+        "type": "list",
+        "default": []
+      },
+      "timeline": {
+        "description": "一天的可打扰度时间线。格式：起始-结束=档位，逗号或换行分隔；档位取 blocked/low/normal/high。没写到的时间一律按 blocked（请勿打扰）处理",
+        "type": "text",
+        "default": "0-8=blocked,8-10=low,10-12=normal,12-14=normal,14-19=low,19-23=high,23-24=low"
+      },
+      "probability": {
+        "description": "各档位的基础概率。实际概率 = 档位概率 × 当前时段活跃度（作息表），所以活跃度 0 时永远不会主动",
+        "type": "object",
+        "items": {
+          "blocked": {
+            "description": "请勿打扰档。默认 0 = 硬闸门；调大于 0 才会让 blocked 时段重新参与掷骰子",
+            "type": "float",
+            "default": 0.0
+          },
+          "low": {
+            "description": "低可打扰档",
+            "type": "float",
+            "default": 0.25
+          },
+          "normal": {
+            "description": "正常可打扰档",
+            "type": "float",
+            "default": 0.7
+          },
+          "high": {
+            "description": "高可打扰档",
+            "type": "float",
+            "default": 1.0
+          }
+        }
+      },
+      "min_idle_minutes": {
+        "description": "距上次收到用户消息至少空闲这么久才考虑主动（分钟）。0 = 不限制",
+        "type": "int",
+        "default": 30
+      },
+      "cooldown_minutes": {
+        "description": "同一会话两次主动之间的最小间隔（分钟）",
+        "type": "int",
+        "default": 45
+      },
+      "daily_budget": {
+        "description": "每个会话每天最多主动几条。0 = 一条都不发",
+        "type": "int",
+        "default": 3
+      },
+      "max_unanswered": {
+        "description": "连续主动未获回复达到此数就停手（收到用户消息即清零）。0 = 不限制",
+        "type": "int",
+        "default": 2
+      },
+      "jitter_minutes": {
+        "description": "计划开口时刻的抖动半径（分钟）——真人不会准点",
+        "type": "int",
+        "default": 12
+      },
+      "check_interval_seconds": {
+        "description": "后台检查频率（秒）。最小 5 秒，避免忙等",
+        "type": "int",
+        "default": 60
+      },
+      "system_prompt": {
+        "description": "可选：主动开口时额外的人设提示。留空 = 用 AstrBot 的默认人设",
+        "type": "text",
+        "default": ""
+      },
+      "prompt_template": {
+        "description": "主动开口的提示词模板",
+        "type": "text",
+        "default": "（现在没什么事，想主动找 Ta 说句话。可以参考最近的聊天，但不要复述。）"
+      },
+      "llm_timeout_seconds": {
+        "description": "单次 LLM 调用的硬超时（秒）。★必须有：provider 卡住时绝不阻塞后台循环（真机教训见 docs/真机反馈与根因分析.md 第十节）",
+        "type": "int",
+        "default": 45
+      }
+    }
+  },
   "debug_timing": {
     "description": "延迟埋点：把每条被处理消息的时序（平台发出时间 → 我们开始处理 → 判定 → 进入发送 → 延时结束）写进 plugin_data/life/timing.jsonl，用来定位「放行之后到真正发送」之间的滞后。默认关闭，开了才会写文件",
     "type": "bool",

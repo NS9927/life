@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import random
 import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -48,8 +49,8 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import Plain
 from astrbot.core.message.message_event_result import MessageChain
 
-from .core import batch as batch_mod, classify, coerce, queue as queue_mod, schedule
-from .core import timing as timing_mod
+from .core import batch as batch_mod, classify, coerce, proactive
+from .core import queue as queue_mod, schedule, timing as timing_mod
 from .core.delay import DelayConfig, reply_delay_seconds
 from .core.gate import Action, Gate, GateConfig, MessageInfo, MessageKind
 
@@ -63,6 +64,32 @@ PLUGIN_VERSION = "v0.4.0"
 GATE_PRIORITY = 996
 
 FLUSH_TICK_SECONDS = 30
+
+# ----------------------------------------------------------------------
+# 主动开口（PROACTIVE）
+#
+# 判定与调度全在 core/proactive.py（纯逻辑，可单测）；这里只做 provider 调用、
+# 分段发送和后台循环的接线。安全红线：
+#   1. enable=false 或 session_list 为空 → **零副作用**（不解析时间线、不起循环、
+#      不调 provider）。见 _apply_config / _start_proactive_loop / _maybe_proactive_check。
+#   2. schedule.sleeping(now) 为真 → 绝不主动（复用我们自己的作息表）。
+#   3. provider 拿不到 / 调用失败 / 超时 → 记一条日志后跳过，**绝不重试循环、绝不阻塞**；
+#      text_chat 必须包 asyncio.wait_for，理由见 docs/真机反馈与根因分析.md 第十节
+#      （livingmemory 每条回复白吃 60 秒的教训）。
+#   4. 同一次检查里**最多一条在飞的 LLM 调用**（顺序 await，不并发打 provider）。
+# ----------------------------------------------------------------------
+PROACTIVE_SEGMENT_MAX_CHARS = 120
+"""主动内容分段长度上限（字符）。"""
+PROACTIVE_SEGMENT_MAX_PARTS = 3
+"""一次主动最多发几段（超出的并进最后一段，不丢内容）。"""
+PROACTIVE_SEGMENT_DELAY_SECONDS = 1.5
+"""段间停顿（秒）——真人打字也是分几条发的。"""
+PROACTIVE_MIN_CHARS = 2
+"""正文短于这个长度就丢弃（空串、一个标点之类）。"""
+PROACTIVE_RECENT_MAX = 6
+"""主动开口参考的最近聊天条数。"""
+PROACTIVE_MIN_INTERVAL_SECONDS = 5.0
+"""后台检查的最小间隔：防止配置写成 0 后忙等（单测会临时调小）。"""
 
 # 埋点挂载在事件对象上的键（优先用 AstrBot 的 extras，退化成私有属性）
 TIMING_EXTRA_KEY = "life_timing"
@@ -168,11 +195,25 @@ class ReplyGate(Star):
         self._running = False
         self._last_flush_date = None
         self._warned: set[str] = set()
+        # 主动开口：默认关闭（_apply_config 会按 proactive 配置重建）
+        self._proactive_cfg = proactive.ProactiveConfig()
+        self._proactive_slots: tuple[proactive.TimelineSlot, ...] = ()
+        self._proactive_states: dict[str, proactive.DailyState] = {}
+        self._proactive_task: asyncio.Task | None = None
+        self._proactive_retired: list[asyncio.Task] = []
+        self._recent: dict[str, deque[str]] = {}
         # 延迟埋点（debug_timing，默认关；开了才写文件）
         self._timing_enabled = False
         self._timing_sink = TimingSink()
         # 给插件页面看的运行计数（不持久化，重启归零）
-        self._stats = {"drops": 0, "allows": 0, "queued": 0, "flushed": 0, "batched": 0}
+        self._stats = {
+            "drops": 0,
+            "allows": 0,
+            "queued": 0,
+            "flushed": 0,
+            "batched": 0,
+            "proactive_sent": 0,
+        }
 
         self._apply_config()
 
@@ -222,6 +263,23 @@ class ReplyGate(Star):
         sleep_cfg = coerce.as_mapping(raw.get("sleep_queue"))
         self._flush_hour = coerce.as_int(sleep_cfg.get("flush_at_hour"), 8)
         self._queue.max_per_session = max(1, coerce.as_int(sleep_cfg.get("max_per_session"), 5))
+
+        # 主动开口：★安全红线——enable=false 或 session_list 为空时**零副作用**：
+        # 不解析 timeline、不起循环、不调 provider。所以时间线只在 active 时才解析。
+        self._proactive_cfg = proactive.ProactiveConfig.from_raw(raw.get("proactive"))
+        self._proactive_slots = ()
+        if self._proactive_cfg.active:
+            try:
+                self._proactive_slots = tuple(
+                    proactive.parse_timeline(self._proactive_cfg.timeline)
+                )
+            except proactive.TimelineError as exc:
+                logger.error(
+                    "[%s] proactive.timeline 配置有误，回退默认时间线：%s", PLUGIN_NAME, exc
+                )
+                self._proactive_slots = tuple(proactive.parse_timeline(proactive.DEFAULT_TIMELINE))
+        # 配置改完立刻对齐循环：打开就起（幂等），关掉就停
+        self._sync_proactive_loop()
 
     def stats_snapshot(self) -> dict:
         """给插件页面读的运行计数。
@@ -343,6 +401,7 @@ class ReplyGate(Star):
     # ------------------------------------------------------------------
     async def initialize(self) -> None:
         self._start_flush_loop()
+        self._start_proactive_loop()  # 默认配置下 active=False，这里什么都不会做
         try:
             from .webapi import WebApi
 
@@ -362,13 +421,20 @@ class ReplyGate(Star):
 
     async def terminate(self) -> None:
         self._running = False
-        task, self._task = self._task, None
-        if task and not task.done():
-            task.cancel()
+        flush, self._task = self._task, None
+        proactive_task, self._proactive_task = self._proactive_task, None
+        retired, self._proactive_retired = self._proactive_retired, []
+        for task in (flush, proactive_task, *retired):
+            if task and not task.done():
+                task.cancel()
+            if task is None:
+                continue
             try:
                 await task
             except asyncio.CancelledError:
                 pass
+            except Exception:  # 后台任务里的异常只记日志，绝不让卸载失败
+                logger.exception("[%s] 后台循环收尾异常（已忽略）", PLUGIN_NAME)
         logger.info("[%s] 已卸载", PLUGIN_NAME)
 
     def _start_flush_loop(self) -> None:
@@ -427,6 +493,249 @@ class ReplyGate(Star):
                 logger.exception("[%s] 补发失败 session=%s", PLUGIN_NAME, umo)
 
     # ------------------------------------------------------------------
+    # 主动开口：后台检查循环（照 _flush_loop 的写法）
+    # ------------------------------------------------------------------
+    def _sync_proactive_loop(self) -> None:
+        """配置变更后对齐主动循环：active → 起（幂等）；不 active → 停。"""
+        if self._proactive_cfg.active:
+            self._start_proactive_loop()
+        else:
+            self._stop_proactive_loop()
+
+    def _start_proactive_loop(self) -> None:
+        """幂等启动主动检查循环。
+
+        ★安全红线：``enable=false`` 或 ``session_list`` 为空 → **直接返回**，
+        不创建任务、不解析时间线、不碰 provider（零副作用）。
+        """
+        if not self._proactive_cfg.active:
+            return
+        if self._proactive_task and not self._proactive_task.done():
+            return
+        try:
+            self._running = True
+            self._proactive_task = asyncio.get_running_loop().create_task(
+                self._proactive_loop(), name=f"{PLUGIN_NAME}-proactive"
+            )
+        except RuntimeError:
+            # 没有正在运行的事件循环（比如 __init__ 阶段）：不起任务，等 initialize()
+            self._proactive_task = None
+
+    def _stop_proactive_loop(self) -> None:
+        """停循环。同步上下文里不能 await，把取消掉的 task 记下来，terminate() 时收尾。"""
+        task, self._proactive_task = self._proactive_task, None
+        if task and not task.done():
+            task.cancel()
+            self._proactive_retired = [t for t in self._proactive_retired if not t.done()]
+            self._proactive_retired.append(task)
+
+    async def _proactive_loop(self) -> None:
+        """每 ``check_interval_seconds`` 醒一次，逐会话跑 should_speak。
+
+        照 ``_flush_loop``：``CancelledError`` 必须重抛（否则 terminate() 的 await 会挂住），
+        其余异常吞掉 + ``logger.exception`` + 睡 60 秒继续——**绝不让后台循环死掉**。
+        """
+        while self._running:
+            try:
+                # 每轮重读配置：页面上改检查频率立即生效
+                interval = max(
+                    PROACTIVE_MIN_INTERVAL_SECONDS,
+                    float(self._proactive_cfg.check_interval_seconds),
+                )
+                await asyncio.sleep(interval)
+                if not self._running:
+                    break
+                await self._maybe_proactive_check()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("[%s] 主动开口循环异常，60s 后重试", PLUGIN_NAME)
+                await asyncio.sleep(60)
+
+    async def _maybe_proactive_check(self) -> None:
+        """一次主动检查：先过一次总闸门（零副作用），再逐会话顺序判定。"""
+        cfg = self._proactive_cfg
+        if not cfg.active:
+            # ★安全红线：关闭 / 无白名单 → 连时间线都不解析，直接返回
+            return
+
+        now = datetime.now()
+        activity = schedule.activity_ratio(
+            now,
+            self._segments,
+            interpolate_minutes=self._interpolate_minutes,
+            weekend_multiplier=self._weekend_multiplier,
+            weekend_sleep_shift_hours=self._weekend_shift,
+        )
+        # 作息表主权：睡着就绝不主动（判定链里也会再确认一次）
+        asleep = schedule.sleeping(now, self._segments, weekend_sleep_shift_hours=self._weekend_shift)
+
+        for umo in sorted(cfg.session_list):
+            try:
+                await self._proactive_for_session(umo, now, activity, asleep)
+            except Exception:
+                # 单个会话出问题不许影响别的会话，更不许把循环搞死
+                logger.exception("[%s] 主动开口检查异常 session=%s（已跳过）", PLUGIN_NAME, umo)
+
+    async def _proactive_for_session(
+        self, umo: str, now: datetime, activity: float, asleep: bool
+    ) -> None:
+        """单个会话：判定 → 生成 → 发送 → 记账。"""
+        cfg = self._proactive_cfg
+        state = self._proactive_states.get(umo)
+        if state is None:
+            state = proactive.DailyState(umo=umo)
+            self._proactive_states[umo] = state
+
+        decision = proactive.should_speak(
+            now,
+            state,
+            cfg,
+            self._rng,
+            timeline=self._proactive_slots,
+            activity=activity,
+            sleeping=asleep,
+        )
+        self._log_proactive(umo, state, cfg, decision)
+        if not decision.allow:
+            return
+
+        # ★同一次检查里最多一条在飞的 LLM 调用：这里是顺序 await，不存在并发打 provider
+        text = await self._generate_proactive_text(umo, cfg)
+        if not text:
+            # provider 拿不到 / 失败 / 超时 / 空回复：跳过就完了，
+            # **绝不在这里重试、绝不阻塞**（下一轮检查自然再判）
+            return
+
+        if await self._send_proactive(umo, text, cfg):
+            state.note_sent(now, cfg.cooldown_minutes)
+            # 计划时刻加抖动：下一次开口不是「准点 45 分钟后」，而是冷却结束
+            # ±jitter 分钟内的某个点，且必须落在可打扰窗口里（真人不会准点）。
+            planned = proactive.next_window(
+                datetime.fromtimestamp(state.cooldown_until),
+                cfg,
+                self._rng,
+                timeline=self._proactive_slots,
+            )
+            if planned is not None:
+                state.cooldown_until = max(state.cooldown_until, planned.timestamp())
+            self._stats["proactive_sent"] += 1
+            logger.info(
+                "[%s] 主动开口已发送 %s | %s | 今日已发 %d/%d",
+                PLUGIN_NAME,
+                umo,
+                decision.log_line(),
+                state.sent,
+                cfg.daily_budget,
+            )
+
+    def _log_proactive(self, umo: str, state: proactive.DailyState, cfg, decision) -> None:
+        """每条主动决策都留痕：umo / 档位 / 概率 / reason / 今日已发几条。"""
+        line = "[%s] 主动决策 %s | %s | 今日已发 %d/%d 未回复 %d"
+        args = (
+            PLUGIN_NAME,
+            umo,
+            decision.log_line(),
+            state.sent,
+            cfg.daily_budget,
+            state.unanswered,
+        )
+        if self._verbose:
+            logger.info(line, *args)
+        else:
+            logger.debug(line, *args)
+
+    async def _generate_proactive_text(self, umo: str, cfg) -> str:
+        """调 provider 生成一条主动内容。失败一律返回空串（调用方跳过）。"""
+        try:
+            provider = self.context.get_using_provider(umo)
+        except Exception:
+            logger.exception("[%s] 主动开口取 provider 失败 session=%s", PLUGIN_NAME, umo)
+            return ""
+        if provider is None:
+            self._warn_once(
+                "proactive_no_provider",
+                "主动开口拿不到 LLM provider，已跳过（不会重试循环，等下次检查）。",
+            )
+            return ""
+
+        prompt, system_prompt = proactive.compose_prompt(cfg)
+        try:
+            # ★必须有超时：provider 卡住时绝不能把后台循环挂在那儿。
+            #   真机教训见 docs/真机反馈与根因分析.md 第十节（livingmemory 每条 60 秒）。
+            response = await asyncio.wait_for(
+                provider.text_chat(
+                    prompt=prompt,
+                    # 空的人设提示传 None，让 AstrBot 用它自己的默认人设
+                    system_prompt=system_prompt or None,
+                    contexts=self._recent_contexts(umo),
+                ),
+                timeout=cfg.llm_timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[%s] 主动开口 LLM 超时（%.1fs），本条放弃 session=%s",
+                PLUGIN_NAME,
+                cfg.llm_timeout_seconds,
+                umo,
+            )
+            return ""
+        except Exception:
+            logger.exception("[%s] 主动开口 LLM 调用失败，本条放弃 session=%s", PLUGIN_NAME, umo)
+            return ""
+        return proactive.extract_text(response)
+
+    async def _send_proactive(self, umo: str, text: str, cfg) -> bool:
+        """分段发送。返回是否**至少发出去一段**（失败只记日志，不抛给循环）。"""
+        cleaned = (text or "").strip()
+        if len(cleaned) < PROACTIVE_MIN_CHARS:
+            logger.info(
+                "[%s] 主动开口内容过短已丢弃 session=%s（%d 字）", PLUGIN_NAME, umo, len(cleaned)
+            )
+            return False
+
+        parts = proactive.split_message(
+            cleaned,
+            max_chars=PROACTIVE_SEGMENT_MAX_CHARS,
+            max_parts=PROACTIVE_SEGMENT_MAX_PARTS,
+        )
+        if not parts:
+            logger.info("[%s] 主动开口内容为空已丢弃 session=%s", PLUGIN_NAME, umo)
+            return False
+
+        sent_any = False
+        for index, part in enumerate(parts):
+            if index:
+                await asyncio.sleep(PROACTIVE_SEGMENT_DELAY_SECONDS)  # 段间停一下，别一口气糊上去
+            try:
+                await self.context.send_message(umo, MessageChain(chain=[Plain(part)]))
+            except Exception:
+                # 已经发出去的段无法撤回；至少要把预算记上，避免下一轮重复发
+                logger.exception("[%s] 主动开口发送失败 session=%s", PLUGIN_NAME, umo)
+                break
+            sent_any = True
+        return sent_any
+
+    # ---- 最近聊天（只给主动开口当参考，关闭时零副作用） ----------------
+    def _note_recent(self, umo: str, text: str) -> None:
+        """记一条最近的用户消息。只在 proactive active 时被调用。"""
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return
+        bucket = self._recent.get(umo)
+        if bucket is None:
+            bucket = deque(maxlen=PROACTIVE_RECENT_MAX)
+            self._recent[umo] = bucket
+        bucket.append(cleaned)
+
+    def _recent_contexts(self, umo: str) -> list[dict]:
+        """最近聊天转成 provider.text_chat 的 contexts 格式（没有就空列表）。"""
+        bucket = self._recent.get(umo)
+        if not bucket:
+            return []
+        return [{"role": "user", "content": text} for text in bucket]
+
+    # ------------------------------------------------------------------
     # 闸门总入口
     # ------------------------------------------------------------------
     @filter.event_message_type(filter.EventMessageType.ALL, priority=GATE_PRIORITY)
@@ -452,6 +761,11 @@ class ReplyGate(Star):
         sender_id = event.get_sender_id()
         if classify.is_self_message(sender_id, event.get_self_id()):
             return
+
+        # 主动开口要「参考最近的聊天」：只在启用时记录（关闭时零副作用）。
+        # 放在闸门判定之前：被已读不回的消息同样是「最近聊过什么」的一部分。
+        if self._proactive_cfg.active:
+            self._note_recent(umo, event.get_message_str())
 
         kind = classify.classify(
             is_private=event.is_private_chat(),
