@@ -5,7 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "astrbot_plugin_reply_gate"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "life"))
 
 from core import batch  # noqa: E402
 from core.batch import BatchPlanner, compose_batch_text  # noqa: E402

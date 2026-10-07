@@ -46,7 +46,8 @@ from .core import batch as batch_mod, classify, coerce, queue as queue_mod, sche
 from .core.delay import DelayConfig, reply_delay_seconds
 from .core.gate import Action, Gate, GateConfig, MessageInfo, MessageKind
 
-PLUGIN_NAME = "astrbot_plugin_reply_gate"
+PLUGIN_NAME = "life"
+PLUGIN_VERSION = "v0.4.0"
 
 # 内置那个调 need_active_reply 的 on_message 没写 priority（默认 0），
 # 内置 persist_group_message 是 maxsize-2。996 足够跑赢 on_message；
@@ -61,7 +62,7 @@ FLUSH_TICK_SECONDS = 30
     PLUGIN_NAME,
     "NS9927",
     "作息概率放行 + 已读不回（防两个 bot 互刷烧 token）",
-    "v0.3.0",
+    PLUGIN_VERSION,
 )
 class ReplyGate(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -78,6 +79,8 @@ class ReplyGate(Star):
         self._running = False
         self._last_flush_date = None
         self._warned: set[str] = set()
+        # 给插件页面看的运行计数（不持久化，重启归零）
+        self._stats = {"drops": 0, "allows": 0, "queued": 0, "flushed": 0, "batched": 0}
 
         self._apply_config()
 
@@ -122,11 +125,23 @@ class ReplyGate(Star):
         self._flush_hour = coerce.as_int(sleep_cfg.get("flush_at_hour"), 8)
         self._queue.max_per_session = max(1, coerce.as_int(sleep_cfg.get("max_per_session"), 5))
 
+    def stats_snapshot(self) -> dict:
+        """给插件页面读的运行计数。"""
+        return dict(self._stats)
+
     # ------------------------------------------------------------------
     # 生命周期
     # ------------------------------------------------------------------
     async def initialize(self) -> None:
         self._start_flush_loop()
+        try:
+            from .webapi import WebApi
+
+            self._web_api = WebApi(self, version=PLUGIN_VERSION)
+            count = self._web_api.register()
+            logger.info("[%s] 已注册 %d 个插件页面接口（/life/page/*）", PLUGIN_NAME, count)
+        except Exception:
+            logger.exception("[%s] 插件页面接口注册失败（不影响闸门本身）", PLUGIN_NAME)
         logger.info(
             "[%s] 已加载：总开关=%s 作息段=%d 睡眠补发=%s:00 闸门=%s",
             PLUGIN_NAME,
@@ -194,6 +209,7 @@ class ReplyGate(Star):
         logger.info(
             "[%s] 起床补发：%d 条消息 / %d 个会话", PLUGIN_NAME, len(pending), len(grouped)
         )
+        self._stats["flushed"] += len(pending)
         for umo, messages in grouped.items():
             text = queue_mod.compose_flush_text(messages)
             try:
@@ -251,11 +267,13 @@ class ReplyGate(Star):
         decision = self._gate.evaluate(info, activity=activity, sleeping=asleep)
 
         if decision.action is Action.DROP:
+            self._stats["drops"] += 1
             event.stop_event()
             self._log_decision(decision, event, now)
             return
 
         if decision.action is Action.QUEUE:
+            self._stats["queued"] += 1
             result = self._queue.push(
                 queue_mod.QueuedMessage(
                     umo=umo,
@@ -284,6 +302,7 @@ class ReplyGate(Star):
         if kind is MessageKind.ADDRESSED:
             plan = self._batch.decide(umo, info.text, activity, info.timestamp or time.time())
             if plan.is_fold:
+                self._stats["batched"] += 1
                 event.stop_event()
                 logger.info(
                     "[%s] 攒着 %s | 活跃度 %.2f 太低，本条并入待回批次（第 %d 条）| %s",
@@ -317,6 +336,7 @@ class ReplyGate(Star):
                 )
 
         # 放行：群聊插话这一路必须把内置概率顶开，否则会被二次掷骰子（概率被平方）
+        self._stats["allows"] += 1
         opened: float | None = None
         if kind is MessageKind.CHIME:
             opened = self._open_active_reply(event)

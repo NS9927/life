@@ -6,8 +6,14 @@ set -e
 
 # 从脚本自身位置推导项目根，避免写死用户名 / 工作区路径
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SRC="$(cd "$SCRIPT_DIR/.." && pwd)/astrbot_plugin_reply_gate"
-DST=/home/bot/bot/data/plugins/astrbot_plugin_reply_gate
+SRC="$(cd "$SCRIPT_DIR/.." && pwd)/life"
+DST=/home/bot/bot/data/plugins/life
+# 2026-10-07 插件从 astrbot_plugin_reply_gate 改名为 life，旧目录必须删掉
+# 否则旧的 main.py 也会被加载，两个闸门同时判定同一条消息
+LEGACY=/home/bot/bot/data/plugins/astrbot_plugin_reply_gate
+
+echo "=== 清理旧插件目录 ==="
+if [ -d "$LEGACY" ]; then rm -rf "$LEGACY"; echo "已删除 $LEGACY"; else echo "无旧目录"; fi
 
 echo "=== 同步插件 ==="
 echo "源：$SRC"
@@ -26,4 +32,4 @@ docker ps --format '{{.Names}} {{.Status}}'
 
 echo
 echo "=== 插件加载日志 ==="
-docker logs astrbot 2>&1 | grep -iE "reply_gate|Loading plugin" | tail -12
+docker logs astrbot 2>&1 | grep -aE "Loading plugin life|\[life\]|life:" | tail -12

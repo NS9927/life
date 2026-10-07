@@ -10,9 +10,9 @@
     "default": "0-2=80\n2-8=0\n8-10=10\n10-12=30\n12-14=40\n14-19=30\n19-23=80\n23-24=60"
   },
   "interpolate_minutes": {
-    "description": "时段切换的平滑插值半径（分钟）。0 = 硬切换（不推荐，突变也是机器特征）",
+    "description": "时段切换的平滑插值半径（分钟）。0 = 硬切换。折线图每半小时一个节点，半径超过 15 会让相邻节点互相干扰",
     "type": "int",
-    "default": 45
+    "default": 15
   },
   "weekend_multiplier": {
     "description": "周末权重系数",

@@ -20,15 +20,15 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(REPO_ROOT / "astrbot_plugin_reply_gate"))
+sys.path.insert(0, str(REPO_ROOT / "life"))
 
 from tests._astrbot_stub import FakePlain, install  # noqa: E402
 
 LOGGER = install()  # 必须在 import main 之前
 
-from astrbot_plugin_reply_gate import main as plugin_main  # noqa: E402
-from astrbot_plugin_reply_gate.core.gate import Action  # noqa: E402
-from astrbot_plugin_reply_gate.core.queue import QueuedMessage  # noqa: E402
+from life import main as plugin_main  # noqa: E402
+from life.core.gate import Action  # noqa: E402
+from life.core.queue import QueuedMessage  # noqa: E402
 
 UMO = "aiocqhttp:GroupMessage:100"
 
@@ -86,12 +86,17 @@ class FakeEvent:
 class FakeContext:
     def __init__(self, active_reply: dict | None = None) -> None:
         self.sent: list[tuple[str, object]] = []
+        self.registered_web_apis: list[tuple] = []
         self.active_reply = (
             active_reply
             if active_reply is not None
             else {"enable": True, "method": "possibility_reply", "possibility_reply": 0.1}
         )
         self.config_obj = {"provider_ltm_settings": {"active_reply": self.active_reply}}
+
+    def register_web_api(self, route, view_handler, methods, desc) -> None:
+        self.registered_web_apis = [r for r in self.registered_web_apis if r[0] != route]
+        self.registered_web_apis.append((route, view_handler, methods, desc))
 
     def get_config(self, umo: str | None = None) -> dict:
         return self.config_obj
@@ -416,6 +421,26 @@ class TestSafetyWiring(WiringTestBase):
         self.assertIsNotNone(plugin._task)
         await plugin.terminate()
         self.assertTrue(plugin._task is None)
+
+    async def test_page_routes_are_registered(self):
+        plugin = self.build()
+        await plugin.initialize()
+        routes = {r[0]: r[2] for r in self.ctx.registered_web_apis}
+        self.assertIn("/life/page/config", routes)
+        self.assertEqual(routes["/life/page/config"], ["GET"])
+        self.assertIn("/life/page/curve", routes)
+        self.assertIn("/life/page/preview", routes)
+        self.assertIn("/life/page/settings", routes)
+        self.assertEqual(routes["/life/page/settings"], ["POST"])
+
+    async def test_stats_snapshot_counts_decisions(self):
+        plugin = self.build(
+            **{"base_probability": {"chime": 0.0, "proactive": 0.3, "addressed": 1.0}}
+        )
+        await plugin.gate(FakeEvent())  # 丢一条
+        snapshot = plugin.stats_snapshot()
+        self.assertEqual(snapshot["drops"], 1)
+        self.assertEqual(snapshot["allows"], 0)
 
 
 if __name__ == "__main__":

@@ -78,7 +78,43 @@ class FakeStar:
 
 
 class FakeContext:
-    pass
+    """插件拿到的 context。页面接口靠 register_web_api 注册，这里记下来方便断言。"""
+
+    def __init__(self) -> None:
+        self.registered_web_apis: list[tuple] = []
+
+    def register_web_api(self, route, view_handler, methods, desc) -> None:
+        self.registered_web_apis = [r for r in self.registered_web_apis if r[0] != route]
+        self.registered_web_apis.append((route, view_handler, methods, desc))
+
+
+class FakeRequest:
+    """假 request 代理（对应 astrbot.api.web.request）。
+
+    测试里直接给 ``payload`` / ``query_params`` 赋值，handler 就能读到。
+    """
+
+    def __init__(self) -> None:
+        self.payload: dict = {}
+        self.query_params: dict = {}
+
+    async def json(self, default=None):
+        return self.payload if self.payload is not None else default
+
+    @property
+    def query(self):
+        return self.query_params
+
+    @property
+    def method(self) -> str:
+        return "POST"
+
+    @property
+    def username(self) -> str:
+        return "tester"
+
+
+web_request = FakeRequest()
 
 
 def fake_register(*_args, **_kwargs):
@@ -131,6 +167,10 @@ def install() -> FakeLogger:
     api.event = event_mod
     api.star = star_mod
 
+    web_mod = types.ModuleType("astrbot.api.web")
+    web_mod.request = web_request
+    api.web = web_mod
+
     core = types.ModuleType("astrbot.core")
     core.__path__ = []
     message = types.ModuleType("astrbot.core.message")
@@ -141,6 +181,7 @@ def install() -> FakeLogger:
     message_result.MessageChain = FakeMessageChain
 
     astrbot.api = api
+    astrbot.logger = logger  # install() 第二次调用时会 return existing.logger
 
     sys.modules.update(
         {
@@ -149,6 +190,7 @@ def install() -> FakeLogger:
             "astrbot.api.event": event_mod,
             "astrbot.api.event.filter": filter_mod,
             "astrbot.api.star": star_mod,
+            "astrbot.api.web": web_mod,
             "astrbot.core": core,
             "astrbot.core.message": message,
             "astrbot.core.message.components": components,

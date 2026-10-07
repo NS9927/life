@@ -5,7 +5,7 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "astrbot_plugin_reply_gate"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "life"))
 
 from core.classify import classify, is_self_message  # noqa: E402
 from core.gate import MessageKind  # noqa: E402

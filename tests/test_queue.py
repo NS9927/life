@@ -6,7 +6,7 @@ import unittest
 from datetime import date, datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "astrbot_plugin_reply_gate"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "life"))
 
 from core import queue  # noqa: E402
 from core.gate import MessageKind  # noqa: E402
