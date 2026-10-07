@@ -4,8 +4,9 @@ AstrBot 拟人化**闸门**插件项目。
 
 > 仓库：<https://github.com/NS9927/life> · 许可：GPL-3.0（见 [LICENSE](LICENSE)）
 
-> **当前状态：设计完成，代码未实现。**
-> 下一个会话直接从 `docs/可行性报告与设计.md` 开工，本文件只做导航。
+> **当前状态：两个闸门的逻辑已实现，126 个单测通过；尚未在真实容器里跑过。**
+> 设计依据见 `docs/可行性报告与设计.md`（第三节的机制描述已按真源码修正），改动前先读它。
+> 下一步是部署到 WSL 里的 AstrBot 观察一天，见文末「进度」。
 
 ---
 
@@ -32,18 +33,37 @@ AstrBot 拟人化**闸门**插件项目。
 life/
 ├── README.md                        本文件
 ├── LICENSE                          GPL-3.0 全文
+├── .gitattributes                   统一 LF（否则 deploy.sh 在 WSL 里报 \r 错）
 ├── docs/
-│   ├── 可行性报告与设计.md          ★ 主文档，开工先读这个
+│   ├── 可行性报告与设计.md          ★ 主文档，含源码级证据与机制修正
 │   └── 灵犀fork-审计报告.md         相关参考（第三方插件审计）
 ├── astrbot_plugin_reply_gate/       插件本体（可整包拷进 data/plugins/）
 │   ├── metadata.yaml
-│   ├── _conf_schema.json            按设计草案写好的配置项
-│   ├── main.py                      骨架：能加载、能部署、逻辑待填
-│   └── core/                        模块目录（待新建 schedule/gate/queue/delay）
-├── tests/                           单元测试（schedule / gate 优先）
+│   ├── _conf_schema.json            配置面板（含 session_cooldown）
+│   ├── main.py                      只做事件适配与钩子注册，不写判定规则
+│   └── core/                        判定逻辑，零框架依赖，可单测
+│       ├── schedule.py              作息表 → 0~1 活跃度（切点插值 + 周末系数）
+│       ├── classify.py              事件标志位 → 被点名 / 群聊插话
+│       ├── gate.py                  判定链 + 循环熔断 + 会话冷却 + 连续丢弃兜底
+│       ├── queue.py                 睡眠队列 + 起床补发文案 + 定时判定
+│       ├── delay.py                 按作息的回复延迟
+│       └── coerce.py                配置值容错（配置填错不许把插件搞崩）
+├── tests/                           126 个单测（含桩掉 astrbot 的接线测试）
 └── scripts/
     └── deploy.sh                    部署到 WSL 并重启 AstrBot
 ```
+
+## 跑测试
+
+不需要 AstrBot 环境、不需要装 pytest（只用标准库）：
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+`core/` 里的模块**一律不 import astrbot**（时间和随机数从外面注入），所以纯逻辑可以离线测；
+`tests/test_main_wiring.py` 会把 `astrbot` 的符号桩掉，真跑一遍 main.py 的钩子，
+验证「被 @ 绝不用概率」「丢弃时 stop_event」「放行时把内置概率顶成 1.0」这些接线是否成立。
 
 ---
 
@@ -88,17 +108,28 @@ wsl -d Ubuntu-24.04 -u root -e bash /mnt/c/<你的用户目录>/Projects/life/sc
 
 ---
 
-## 开工顺序
+## 进度
 
-见 `docs/可行性报告与设计.md` 第六节。摘要：
+设计文档第六节列的七步，现在的状态：
 
-1. 验主动消息插件的调度层（唯一未验证项）
-2. `core/schedule.py` + 单测（纯函数，最容易先跑通）
-3. `core/gate.py` + 单测（含连续丢弃逻辑）
-4. 接高优先级 handler，验证 `possibility_reply` 被动态改写且生效
-5. 睡眠拦截 + 队列
-6. 回复延迟
-7. 端到端观察一天
+| # | 步骤 | 状态 |
+|---|---|---|
+| 1 | 验主动消息插件的调度层 | ✅ **已定案：路线 A 不成立**，必须自研调度（证据见设计文档第三节） |
+| 2 | `core/schedule.py` + 单测 | ✅ 完成（28 测） |
+| 3 | `core/gate.py` + 单测（含连续丢弃） | ✅ 完成（31 测），另加循环熔断与会话冷却 |
+| 4 | 高优先级 handler + 动态改写 `possibility_reply` | ✅ 代码完成、接线已用桩测过（**未在真容器验证**） |
+| 5 | 睡眠拦截 + 队列 + 起床补发 | ✅ 完成（补发为 MVP 文案版，见下） |
+| 6 | 回复延迟 | ✅ 完成 |
+| 7 | 端到端观察一天 | ⬜ **未做——下一步** |
+
+**已知待办**（按重要性）：
+
+1. **部署到真容器验证**：`scripts/deploy.sh`（会 `docker restart astrbot`），然后看日志里
+   `已读不回` / `放行` 的实际分布，重点确认「被 @ 一定回」。
+2. **主动开口（PROACTIVE）没有实现**：它不走事件，需要自研调度器。`gate.py` 已经支持
+   `MessageKind.PROACTIVE`，缺的是「什么时候该主动找人说话」的调度 + 话题生成。
+3. **起床补发目前只发文案**（「刚看到…」+ 转述积压消息），没有把消息回炉给 LLM。
+   要做真回复得接 `context.get_using_provider(umo)` 再 `text_chat()`。
 
 ---
 

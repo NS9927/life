@@ -81,6 +81,32 @@
       }
     }
   },
+  "session_cooldown": {
+    "description": "会话冷却：同一会话短时间内已回过 N 次就暂时已读不回（设计文档 8.4 第 3 层，防刷屏兜底）",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用会话冷却",
+        "type": "bool",
+        "default": true
+      },
+      "window_seconds": {
+        "description": "统计窗口（秒）",
+        "type": "int",
+        "default": 60
+      },
+      "max_replies": {
+        "description": "窗口内最多回几条",
+        "type": "int",
+        "default": 3
+      },
+      "exempt_addressed": {
+        "description": "被 @ / 私聊时豁免（不建议关，关了会在对方连问时变哑巴）",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
   "sleep_queue": {
     "description": "睡眠时段的消息排队，起床后补发",
     "type": "object",
@@ -99,6 +125,11 @@
         "description": "只对「被点名 / 私聊」的消息补发（群聊闲聊直接丢）",
         "type": "bool",
         "default": true
+      },
+      "max_per_session": {
+        "description": "每个会话最多留几条待补发。半夜连发十条不会早上全部重放，只留最新的",
+        "type": "int",
+        "default": 5
       }
     }
   },
