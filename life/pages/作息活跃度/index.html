@@ -177,6 +177,7 @@
   var N = 48;                    // 48 个半小时档
   var H = 380;                   // SVG 高度
   var PT = 20, PB = 34, PL = 56, PR = 24;
+  var HIT_RADIUS = 16;           // 「抓得住」的半径（SVG 单位）：命中圈画多大，按下的判定就用多大
   var DEFAULT_WEIGHTS_TEXT = '0-2=80\n2-8=0\n8-10=10\n10-12=30\n12-14=40\n14-19=30\n19-23=80\n23-24=60';
 
   var $ = function (s) { return document.querySelector(s); };
@@ -353,7 +354,7 @@
     for (var i = 0; i < N; i++) {
       var px = r2(xAt(i * 0.5 + 0.25));
       pts += '<g class="ptg">'
-        + '<circle class="hit" data-i="' + i + '" cx="' + px + '" cy="0" r="13"/>'
+        + '<circle class="hit" data-i="' + i + '" cx="' + px + '" cy="0" r="' + HIT_RADIUS + '"/>'
         + '<circle class="dot" data-i="' + i + '" cx="' + px + '" cy="0" r="5.5" tabindex="0" role="slider"'
         + ' aria-label="' + slotLabel(i) + ' 权重" aria-valuemin="0" aria-valuemax="100"></circle>'
         + '</g>';
@@ -377,14 +378,14 @@
 
     dotEls.forEach(function (el) {
       el.addEventListener('keydown', onDotKey);
-      el.addEventListener('dblclick', onDotDbl);
       el.addEventListener('focus', onDotFocus);
       el.addEventListener('blur', onDotBlur);
     });
-    hitEls.forEach(function (el) {
-      el.addEventListener('pointerdown', onHitDown);
-      el.addEventListener('dblclick', onDotDbl);
-    });
+    // .hit / .dot 这两个圆都不再各自接 pointerdown / dblclick，判定统一由 svg 上的 onChartDown /
+    // onChartDbl 用「离按下位置最近的点」来做。原因：可见 .dot 画在 .hit 之上、且靠元素命中时
+    // 「按在看得见的点心上」反而落到旁边那个点上；窄屏（≈720px）相邻圆心只有 ~12px，而命中圈 r=16
+    // 会互相重叠，谁在最上面只取决于 DOM 绘制顺序 —— 拖单点时就会抓错成右边的邻居。
+    // 现在 .hit 只负责鼠标形状（ns-resize）与悬停区域，几何上正好等于可抓取的半径。
   }
 
   // 主曲线：普通折线，依次穿过 48 个节点圆心（相邻两点之间是直线段，不是阶梯）。
@@ -454,11 +455,31 @@
     return clamp100(100 * (1 - (y - PT) / plotH));
   }
 
-  function onHitDown(e) {
+  // 拖动起点判定：找离按下位置最近的那个点（SVG 单位里的欧氏距离），而不是问「点到的是哪个元素」。
+  // 这样按在看得见的圆点正中间（距离 0）一定抓到它自己，稍微偏出圆点一点也能抓到（HIT_RADIUS 内），
+  // 并且不受两个圆谁画在上面的影响 —— 窄屏相邻命中圈重叠时也不会抓到隔壁点。
+  function nearestDotIndex(e) {
+    var r = svg.getBoundingClientRect();
+    var sx = (r.width || W) / W;
+    var sy = (r.height || H) / H;
+    var px = (e.clientX - r.left) / (sx || 1);
+    var py = (e.clientY - r.top) / (sy || 1);
+    var best = -1, bestD2 = HIT_RADIUS * HIT_RADIUS;
+    for (var i = 0; i < N; i++) {
+      var dx = px - xAt(i * 0.5 + 0.25);
+      var dy = py - yAt(state.weights[i]);
+      var d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) { bestD2 = d2; best = i; }
+    }
+    return best;
+  }
+
+  function onChartDown(e) {
     if (e.button !== undefined && e.button !== 0) return;
-    var i = Number(e.currentTarget.getAttribute('data-i'));
+    var i = nearestDotIndex(e);
+    if (i < 0) return;                              // 离所有点都太远：不启动拖动
     e.preventDefault();
-    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+    try { svg.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
     state.dragging = {
       i: i,
       startV: state.weights[i],
@@ -525,9 +546,11 @@
     showTip(i, state.weights[i]);
   }
 
-  function onDotDbl(e) {
+  // 双击归零 / 再双击恢复：和拖动用同一套「最近的点」判定，双击哪颗点就作用于哪颗点
+  function onChartDbl(e) {
+    var i = nearestDotIndex(e);
+    if (i < 0) return;
     e.preventDefault();
-    var i = Number(e.currentTarget.getAttribute('data-i'));
     if (Object.prototype.hasOwnProperty.call(state.zeroed, i)) {
       state.weights[i] = state.zeroed[i];
       delete state.zeroed[i];
@@ -729,6 +752,8 @@
   }
 
   function bindStaticUI() {
+    svg.addEventListener('pointerdown', onChartDown);
+    svg.addEventListener('dblclick', onChartDbl);
     svg.addEventListener('pointermove', onPointerMove);
     svg.addEventListener('pointerup', onPointerUp);
     svg.addEventListener('pointercancel', onPointerUp);
