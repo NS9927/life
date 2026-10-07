@@ -15,7 +15,10 @@
 #   keep-builtin   保留内置注入，关掉 flow 插件
 #                  —— 少一个第三方插件依赖，但内置那份存在内存里，重启即丢
 #
-# 两种模式都会顺手做：群历史窗口 700->150 / 1000->200、reply_with_quote 关、分段阈值 400->2000
+# 两种模式都会顺手做：群历史窗口 700->150 / 1000->200、reply_with_quote 关、分段阈值 400->2000、
+# 以及**上下文压缩**（max_turns -1->24 开轮次截断；fallback_max_tokens 128000->32000；
+# keep_recent_ratio 0.15->0.3）——会话历史里的内联图片是「回复越来越慢」的真凶，详见
+# docs/真机反馈与根因分析.md 第九节。
 set -e
 
 APPLY=0
@@ -114,6 +117,35 @@ for path in TARGETS:
                 f"segmented_reply.words_count_threshold: {seg['words_count_threshold']} -> 2000"
             )
             seg["words_count_threshold"] = 2000
+
+    # 3) 上下文压缩：真凶不是注入，是**会话历史里的 base64 图片**在滚雪球
+    #    实测单会话 2~11 MB、token_usage 最高 21 万，其中 90~99% 是内联图片。
+    #    AstrBot 有两道闸（core/agent/context/manager.py:60-76）：
+    #      轮次截断 max_turns  —— 现值 -1 = **完全关闭**
+    #      token 压缩 fallback_max_tokens —— 现值 128000，等于不触发
+    #    两道都形同虚设，所以历史无限涨。这里把两道都打开。
+    ar = data.get("agent_runner")
+    if isinstance(ar, dict):
+        comp = (ar.get("config") or {}).get("compression")
+        if isinstance(comp, dict):
+            if comp.get("max_turns") in (-1, None):
+                touched.append("agent_runner.config.compression.max_turns: -1 -> 24（开轮次截断）")
+                comp["max_turns"] = 24
+            if comp.get("trim_turns") in (1, None):
+                touched.append("agent_runner.config.compression.trim_turns: 1 -> 6")
+                comp["trim_turns"] = 6
+            if (comp.get("fallback_max_tokens") or 0) > 32000:
+                touched.append(
+                    f"agent_runner.config.compression.fallback_max_tokens: "
+                    f"{comp['fallback_max_tokens']} -> 32000"
+                )
+                comp["fallback_max_tokens"] = 32000
+            if (comp.get("keep_recent_ratio") or 0) < 0.3:
+                touched.append(
+                    f"agent_runner.config.compression.keep_recent_ratio: "
+                    f"{comp['keep_recent_ratio']} -> 0.3"
+                )
+                comp["keep_recent_ratio"] = 0.3
 
     if touched:
         print(f"\n=== {pathlib.Path(path).name} ===")
