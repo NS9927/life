@@ -315,8 +315,8 @@ class TestCooldown(unittest.TestCase):
 class TestConfigFromRaw(unittest.TestCase):
     def test_defaults_when_empty(self):
         cfg = GateConfig.from_raw(None)
-        self.assertEqual(cfg.consecutive_drop_limit, 2)
-        self.assertEqual(cfg.base_probability["chime"], 0.1)
+        self.assertEqual(cfg.consecutive_drop_limit, 3)
+        self.assertEqual(cfg.base_probability["chime"], 0.03)
         self.assertTrue(cfg.loop_breaker_enable)
         self.assertEqual(cfg.silence_list, frozenset())
 
@@ -346,7 +346,7 @@ class TestConfigFromRaw(unittest.TestCase):
 
     def test_broken_values_do_not_crash(self):
         cfg = GateConfig.from_raw({"base_probability": "不是字典", "consecutive_drop_limit": "x"})
-        self.assertEqual(cfg.base_probability["chime"], 0.1)
+        self.assertEqual(cfg.base_probability["chime"], 0.03)
 
 
 class TestDecisionShape(unittest.TestCase):

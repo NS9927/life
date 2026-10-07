@@ -42,7 +42,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import Plain
 from astrbot.core.message.message_event_result import MessageChain
 
-from .core import classify, coerce, queue as queue_mod, schedule
+from .core import batch as batch_mod, classify, coerce, queue as queue_mod, schedule
 from .core.delay import DelayConfig, reply_delay_seconds
 from .core.gate import Action, Gate, GateConfig, MessageInfo, MessageKind
 
@@ -61,7 +61,7 @@ FLUSH_TICK_SECONDS = 30
     PLUGIN_NAME,
     "NS9927",
     "作息概率放行 + 已读不回（防两个 bot 互刷烧 token）",
-    "v0.2.0",
+    "v0.3.0",
 )
 class ReplyGate(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -72,6 +72,7 @@ class ReplyGate(Star):
 
         self._gate = Gate()
         self._queue = queue_mod.SleepQueue()
+        self._batch = batch_mod.BatchPlanner()
         self._segments = schedule.parse_time_weights(schedule.DEFAULT_TIME_WEIGHTS)
         self._task: asyncio.Task | None = None
         self._running = False
@@ -105,6 +106,17 @@ class ReplyGate(Star):
 
         self._gate.config = GateConfig.from_raw(raw)
         self._delay_cfg = DelayConfig.from_raw(raw.get("reply_delay"))
+
+        # 被点名的回复策略：活跃度高→立刻回；低→攒一波统一回；0→睡眠排队
+        addressed = coerce.as_mapping(raw.get("addressed_reply"))
+        self._batch = batch_mod.BatchPlanner(
+            enabled=coerce.as_bool(addressed.get("enable"), True),
+            window_seconds=max(0.0, coerce.as_float(addressed.get("batch_window_seconds"), 120.0)),
+            immediate_threshold=min(
+                1.0, max(0.0, coerce.as_float(addressed.get("immediate_threshold"), 0.6))
+            ),
+            max_messages=max(1, coerce.as_int(addressed.get("batch_max_messages"), 10)),
+        )
 
         sleep_cfg = coerce.as_mapping(raw.get("sleep_queue"))
         self._flush_hour = coerce.as_int(sleep_cfg.get("flush_at_hour"), 8)
@@ -267,6 +279,42 @@ class ReplyGate(Star):
                     detail,
                 )
             return
+
+        # 被点名：按活跃度分三档（睡眠那档已经在上面 return 了）
+        if kind is MessageKind.ADDRESSED:
+            plan = self._batch.decide(umo, info.text, activity, info.timestamp or time.time())
+            if plan.is_fold:
+                event.stop_event()
+                logger.info(
+                    "[%s] 攒着 %s | 活跃度 %.2f 太低，本条并入待回批次（第 %d 条）| %s",
+                    PLUGIN_NAME,
+                    umo,
+                    activity,
+                    plan.buffered,
+                    info.text[:40],
+                )
+                return
+            if plan.is_lead and plan.wait_seconds > 0:
+                logger.info(
+                    "[%s] 先攒后回 %s | 活跃度 %.2f < 阈值 %.2f，等 %.0f 秒统一回 | %s",
+                    PLUGIN_NAME,
+                    umo,
+                    activity,
+                    self._batch.immediate_threshold,
+                    plan.wait_seconds,
+                    info.text[:40],
+                )
+                await asyncio.sleep(plan.wait_seconds)
+                merged = self._batch.finish(umo)
+                if merged:
+                    event.message_str = merged  # 让 LLM 一次看到攒下的全部内容
+                logger.info(
+                    "[%s] 统一回复 %s | 攒了 %d 条，合并后 %d 字",
+                    PLUGIN_NAME,
+                    umo,
+                    plan.buffered if merged else 0,
+                    len(merged),
+                )
 
         # 放行：群聊插话这一路必须把内置概率顶开，否则会被二次掷骰子（概率被平方）
         opened: float | None = None

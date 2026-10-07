@@ -29,9 +29,9 @@
     "type": "object",
     "items": {
       "chime": {
-        "description": "群聊插话（没 @ 它）",
+        "description": "群聊插话（没 @ 它）。真机实测 0.1 在活跃群里太吵，改 0.03",
         "type": "float",
-        "default": 0.1
+        "default": 0.03
       },
       "proactive": {
         "description": "主动开口（没人问它）",
@@ -48,7 +48,33 @@
   "consecutive_drop_limit": {
     "description": "同一发送者最多连续被丢几条。防止「连发三条一条都不回」。0 = 关闭",
     "type": "int",
-    "default": 2
+    "default": 3
+  },
+  "addressed_reply": {
+    "description": "被 @ / 私聊的回复策略，按活跃度分档",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用分档（关掉就永远立刻回）",
+        "type": "bool",
+        "default": true
+      },
+      "immediate_threshold": {
+        "description": "活跃度 ≥ 此值：被点名立刻回。低于此值：攒一波统一回一次",
+        "type": "float",
+        "default": 0.6
+      },
+      "batch_window_seconds": {
+        "description": "低活跃度时攒多久再统一回（秒）。这段时间里后到的消息会并进同一次回复，不额外花 token",
+        "type": "float",
+        "default": 120.0
+      },
+      "batch_max_messages": {
+        "description": "一次统一回复最多合并几条（超出的只保留最新的，旧的标明还有几条没看）",
+        "type": "int",
+        "default": 10
+      }
+    }
   },
   "consecutive_drop_scope": {
     "description": "连丢计数的范围：sender = 按发送者（推荐，群里一堆人各说一句不会触发）；session = 按会话（整群共用，容易让机器人变吵）",

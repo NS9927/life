@@ -87,9 +87,9 @@ class GateConfig:
     """闸门配置。全部可配，默认值与 _conf_schema.json 一致。"""
 
     base_probability: Mapping[str, float] = field(
-        default_factory=lambda: {"chime": 0.1, "proactive": 0.3, "addressed": 1.0}
+        default_factory=lambda: {"chime": 0.03, "proactive": 0.3, "addressed": 1.0}
     )
-    consecutive_drop_limit: int = 2
+    consecutive_drop_limit: int = 3
     consecutive_drop_scope: str = "sender"  # "sender"（默认，推荐）或 "session"
     silence_list: frozenset[str] = frozenset()
 
@@ -115,7 +115,7 @@ class GateConfig:
 
         base_raw = sub("base_probability")
         base = {
-            "chime": coerce.as_float(base_raw.get("chime"), 0.1),
+            "chime": coerce.as_float(base_raw.get("chime"), 0.03),
             "proactive": coerce.as_float(base_raw.get("proactive"), 0.3),
             "addressed": coerce.as_float(base_raw.get("addressed"), 1.0),
         }
@@ -126,7 +126,7 @@ class GateConfig:
 
         return cls(
             base_probability=base,
-            consecutive_drop_limit=max(0, coerce.as_int((raw or {}).get("consecutive_drop_limit"), 2)),
+            consecutive_drop_limit=max(0, coerce.as_int((raw or {}).get("consecutive_drop_limit"), 3)),
             consecutive_drop_scope=(
                 "session"
                 if str((raw or {}).get("consecutive_drop_scope", "sender")).strip().lower()

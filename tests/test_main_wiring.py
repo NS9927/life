@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 import unittest
@@ -52,7 +53,7 @@ class FakeEvent:
         self._sender = sender
         self._self_id = self_id
         self._private = private
-        self._text = text
+        self.message_str = text
         self._name = sender_name
         self._stopped = False
         self._result = object() if with_result else None
@@ -70,7 +71,7 @@ class FakeEvent:
         return self._name
 
     def get_message_str(self) -> str:
-        return self._text
+        return self.message_str
 
     def stop_event(self) -> None:
         self._stopped = True
@@ -110,6 +111,8 @@ def make_config(**over) -> dict:
         "session_cooldown": {"enable": False},
         "sleep_queue": {"enable": True, "flush_at_hour": 8, "only_addressed": True},
         "reply_delay": {"enable": False},
+        # 默认关掉分档（阈值 0 = 永远立刻回），单独测分档时再覆盖
+        "addressed_reply": {"immediate_threshold": 0.0, "batch_window_seconds": 0.05},
         "silence_list": [],
         "session_whitelist": [],
         "verbose_log": True,
@@ -321,6 +324,48 @@ class TestCooldownWiring(WiringTestBase):
         event.stop_event()
         await plugin.apply_reply_delay(event)
         self.assertEqual(len(plugin._gate.session(UMO).reply_times), 0)
+
+
+class TestAddressedTiers(WiringTestBase):
+    """活跃度分档：高→立刻回；低→攒一波统一回；0→睡眠排队（另一组测试）。"""
+
+    def batch_cfg(self, window: float = 0.2):
+        return {
+            "enable": True,
+            "immediate_threshold": 0.6,
+            "batch_window_seconds": window,
+            "batch_max_messages": 10,
+        }
+
+    async def test_high_activity_replies_immediately(self):
+        plugin = self.build(time_weights="0-24=100", addressed_reply=self.batch_cfg())
+        event = FakeEvent(at_or_wake=True)
+        await plugin.gate(event)
+        self.assertFalse(event.is_stopped())
+        self.assertFalse(plugin._batch.active(UMO))
+
+    async def test_low_activity_waits_then_replies_with_everything(self):
+        plugin = self.build(time_weights="0-24=10", addressed_reply=self.batch_cfg(window=0.2))
+        leader = FakeEvent(at_or_wake=True, text="第一条")
+        task = asyncio.create_task(plugin.gate(leader))  # 领队在等窗口
+
+        await asyncio.sleep(0.02)
+        folded = FakeEvent(at_or_wake=True, text="第二条")
+        await plugin.gate(folded)
+
+        # 后到的那条被 stop（0 token），内容并进领队的正文
+        self.assertTrue(folded.is_stopped())
+        await task
+        self.assertFalse(leader.is_stopped())
+        self.assertIn("第一条", leader.message_str)
+        self.assertIn("第二条", leader.message_str)
+        self.assertTrue(any("统一回复" in line for line in LOGGER.messages()))
+
+    async def test_two_sessions_do_not_share_a_batch(self):
+        plugin = self.build(time_weights="0-24=10", addressed_reply=self.batch_cfg(window=0.05))
+        other = FakeEvent(at_or_wake=True, umo="aiocqhttp:GroupMessage:200")
+        await plugin.gate(other)
+        self.assertEqual(len(plugin._batch.pending()), 0)  # 领队已结束并清空
 
 
 class TestSafetyWiring(WiringTestBase):
