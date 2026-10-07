@@ -1,7 +1,7 @@
 name: "astrbot_plugin_reply_gate"
 display_name: "回复闸门 (Reply Gate)"
 author: "NS9927"
-version: "v0.1.0"
+version: "v0.2.0"
 desc: "拟人化闸门：作息时段按概率放行消息（凌晨不发、晚上多发），并对被点名消息做睡眠排队；同时提供静默名单与循环熔断，防止两个 bot 互相回复烧 token。"
 repo: "https://github.com/NS9927/life"
 astrbot_version: ">=4.24.0"

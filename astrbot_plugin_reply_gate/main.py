@@ -61,7 +61,7 @@ FLUSH_TICK_SECONDS = 30
     PLUGIN_NAME,
     "NS9927",
     "作息概率放行 + 已读不回（防两个 bot 互刷烧 token）",
-    "v0.1.0",
+    "v0.2.0",
 )
 class ReplyGate(Star):
     def __init__(self, context: Context, config: dict | None = None):
@@ -269,22 +269,31 @@ class ReplyGate(Star):
             return
 
         # 放行：群聊插话这一路必须把内置概率顶开，否则会被二次掷骰子（概率被平方）
+        opened: float | None = None
         if kind is MessageKind.CHIME:
-            self._open_active_reply(event)
+            opened = self._open_active_reply(event)
 
         if self._verbose:
-            logger.debug(
-                "[%s] 放行 %s | %s | %s", PLUGIN_NAME, umo, decision.log_line(), info.text[:40]
+            logger.info(
+                "[%s] 放行 %s | %s | 内置 active_reply 概率=%s | %s",
+                PLUGIN_NAME,
+                umo,
+                decision.log_line(),
+                "已顶到 1.0" if opened == 1.0 else ("无" if opened is None else f"{opened}"),
+                info.text[:40],
             )
 
-    def _open_active_reply(self, event: AstrMessageEvent) -> None:
-        """把内置 ``active_reply.possibility_reply`` 顶到 1.0。
+    def _open_active_reply(self, event: AstrMessageEvent) -> float | None:
+        """把内置 ``active_reply.possibility_reply`` 顶到 1.0，返回**回读值**。
 
         内置的判定（group_chat_context.need_active_reply）每轮重读这个值，
         而我们**已经**掷过骰子了（基础概率 × 时段活跃度）。这里不再掷第二次，
         所以写 1.0 = 「这一轮我批准了，你直接放行」。
 
         只写内存对象，**不调 save_config()**。
+
+        返回回读值是为了排障：2026-10-07 真机验证时，就是靠「写了 1.0 但内置没插话」
+        这个现象才定位到问题的。写不到就返回 None。
         """
         try:
             cfg = self.context.get_config(umo=event.unified_msg_origin)
@@ -296,7 +305,7 @@ class ReplyGate(Star):
                     "找不到 provider_ltm_settings.active_reply.possibility_reply，"
                     "群聊插话概率改不动（内置群聊上下文感知可能没开）。",
                 )
-                return
+                return None
             if not coerce.as_bool(active.get("enable"), False):
                 self._warn_once(
                     "active_reply_disabled",
@@ -311,8 +320,11 @@ class ReplyGate(Star):
                     "本插件改写的概率值不会生效。",
                 )
             active["possibility_reply"] = 1.0
+            readback = active["possibility_reply"]  # 纯内存写，立刻回读确认
+            return float(readback) if isinstance(readback, (int, float)) else None
         except Exception:
             logger.exception("[%s] 改写 active_reply 概率失败（不影响本次放行）", PLUGIN_NAME)
+            return None
 
     def _log_decision(self, decision, event: AstrMessageEvent, now: datetime) -> None:
         if not self._verbose:

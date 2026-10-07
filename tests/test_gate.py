@@ -159,6 +159,56 @@ class TestConsecutiveDropFloor(unittest.TestCase):
         for _ in range(5):
             self.assertIs(g.evaluate(info(), activity=0.5, sleeping=False).action, Action.DROP)
 
+    def test_floor_is_per_sender_by_default(self):
+        # 真机教训：按会话计数会让热闹的群变成「每 N 条必插一句」——
+        # 8 个人各说一句、彼此无关，会话计数照样累加。默认必须按发送者。
+        g, _, _ = make_gate(rng_value=0.99, consecutive_drop_limit=2)
+        for sender in ("A", "B", "C", "D", "E", "F"):
+            decision = g.evaluate(info(sender=sender), activity=0.5, sleeping=False)
+            self.assertIs(decision.action, Action.DROP, msg=f"{sender} 不该被强制放行")
+        self.assertEqual(g.session("aiocqhttp:GroupMessage:100").consecutive_drops, 6)
+
+    def test_same_sender_trips_the_floor(self):
+        g, _, _ = make_gate(rng_value=0.99, consecutive_drop_limit=2)
+        g.evaluate(info(sender="A"), activity=0.5, sleeping=False)
+        g.evaluate(info(sender="A"), activity=0.5, sleeping=False)
+        g.evaluate(info(sender="B"), activity=0.5, sleeping=False)  # B 只丢 1 条，不受影响
+        third = g.evaluate(info(sender="A"), activity=0.5, sleeping=False)
+        self.assertIs(third.action, Action.ALLOW)
+        self.assertEqual(third.reason, gate.REASON_CONSECUTIVE_FLOOR)
+        self.assertIn("该发送者", third.detail)
+
+    def test_answering_clears_that_sender_only(self):
+        g, _, _ = make_gate(rng_value=0.99, consecutive_drop_limit=2)
+        g.evaluate(info(sender="A"), activity=0.5, sleeping=False)
+        g.evaluate(info(sender="A"), activity=0.5, sleeping=False)
+        g.evaluate(info(sender="B"), activity=0.5, sleeping=False)
+        g.evaluate(info(sender="A"), activity=0.5, sleeping=False)  # A 被强制放行
+        state = g.session("aiocqhttp:GroupMessage:100")
+        self.assertEqual(state.dropped_from("A"), 0)
+        self.assertEqual(state.dropped_from("B"), 1)
+
+    def test_session_scope_keeps_old_behaviour(self):
+        g, _, _ = make_gate(
+            rng_value=0.99, consecutive_drop_limit=2, consecutive_drop_scope="session"
+        )
+        g.evaluate(info(sender="A"), activity=0.5, sleeping=False)
+        g.evaluate(info(sender="B"), activity=0.5, sleeping=False)
+        third = g.evaluate(info(sender="C"), activity=0.5, sleeping=False)
+        self.assertIs(third.action, Action.ALLOW)
+        self.assertIn("本会话", third.detail)
+
+    def test_scope_config_parsing(self):
+        self.assertEqual(GateConfig.from_raw({}).consecutive_drop_scope, "sender")
+        self.assertEqual(
+            GateConfig.from_raw({"consecutive_drop_scope": "SESSION"}).consecutive_drop_scope,
+            "session",
+        )
+        self.assertEqual(
+            GateConfig.from_raw({"consecutive_drop_scope": "垃圾"}).consecutive_drop_scope,
+            "sender",
+        )
+
 
 class TestLoopBreaker(unittest.TestCase):
     def _alternate(self, g: Gate, rounds: int = 2) -> None:

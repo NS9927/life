@@ -22,14 +22,21 @@ class DelayConfig:
 
     enable: bool = True
     min_seconds: float = 1.0
-    max_seconds: float = 30.0
+    max_seconds: float = 8.0
     sleep_extra_seconds: float = 20.0
+    activity_penalty: float = 0.35
+    """活跃度低时的额外延迟系数：额外 = (1−活跃度) × (max−min) × 本系数。
+
+    2026-10-07 真机验证后调过：原来 max_seconds 默认 30、系数按 1.0 算，
+    活跃度 0.3 时回复要等 21~50 秒，群里已经有人抱怨「延迟又起来了」。
+    现在默认 1~8 秒、最多再加 35%（活跃度 0.3 时约 3.5~10.5 秒）。
+    """
 
     @classmethod
     def from_raw(cls, raw: dict | None) -> DelayConfig:
         raw = coerce.as_mapping(raw)
         lo = coerce.as_float(raw.get("min_seconds"), 1.0)
-        hi = coerce.as_float(raw.get("max_seconds"), 30.0)
+        hi = coerce.as_float(raw.get("max_seconds"), 8.0)
         if hi < lo:  # 配置写反了也认，别让延迟变成负数
             lo, hi = hi, lo
         return cls(
@@ -37,6 +44,7 @@ class DelayConfig:
             min_seconds=max(0.0, lo),
             max_seconds=max(0.0, hi),
             sleep_extra_seconds=max(0.0, coerce.as_float(raw.get("sleep_extra_seconds"), 20.0)),
+            activity_penalty=min(2.0, max(0.0, coerce.as_float(raw.get("activity_penalty"), 0.35))),
         )
 
 
@@ -60,6 +68,6 @@ def reply_delay_seconds(
     activity = min(1.0, max(0.0, float(activity)))
     span = cfg.max_seconds - cfg.min_seconds
     base = rand.uniform(cfg.min_seconds, cfg.max_seconds)
-    extra = (1.0 - activity) * span
+    extra = (1.0 - activity) * span * cfg.activity_penalty
     total = base + extra + (cfg.sleep_extra_seconds if sleeping else 0.0)
     return max(0.0, total)

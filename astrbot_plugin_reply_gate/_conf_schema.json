@@ -46,9 +46,14 @@
     }
   },
   "consecutive_drop_limit": {
-    "description": "同一会话最多连续丢弃几条。防止连发多条时出现「一条都不回」",
+    "description": "同一发送者最多连续被丢几条。防止「连发三条一条都不回」。0 = 关闭",
     "type": "int",
     "default": 2
+  },
+  "consecutive_drop_scope": {
+    "description": "连丢计数的范围：sender = 按发送者（推荐，群里一堆人各说一句不会触发）；session = 按会话（整群共用，容易让机器人变吵）",
+    "type": "string",
+    "default": "sender"
   },
   "silence_list": {
     "description": "静默名单（QQ 号）。名单内发送者的消息直接已读不回，不进 LLM",
@@ -148,9 +153,14 @@
         "default": 1.0
       },
       "max_seconds": {
-        "description": "最大延迟（秒）",
+        "description": "最大延迟（秒）。原来默认 30 太夸张，真机实测后改成 8",
         "type": "float",
-        "default": 30.0
+        "default": 8.0
+      },
+      "activity_penalty": {
+        "description": "活跃度低时的额外延迟系数：额外 = (1−活跃度) × (max−min) × 本系数。0 = 延迟与活跃度无关",
+        "type": "float",
+        "default": 0.35
       },
       "sleep_extra_seconds": {
         "description": "睡眠时段的额外延迟（秒）",

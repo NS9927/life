@@ -90,6 +90,7 @@ class GateConfig:
         default_factory=lambda: {"chime": 0.1, "proactive": 0.3, "addressed": 1.0}
     )
     consecutive_drop_limit: int = 2
+    consecutive_drop_scope: str = "sender"  # "sender"（默认，推荐）或 "session"
     silence_list: frozenset[str] = frozenset()
 
     loop_breaker_enable: bool = True
@@ -126,6 +127,12 @@ class GateConfig:
         return cls(
             base_probability=base,
             consecutive_drop_limit=max(0, coerce.as_int((raw or {}).get("consecutive_drop_limit"), 2)),
+            consecutive_drop_scope=(
+                "session"
+                if str((raw or {}).get("consecutive_drop_scope", "sender")).strip().lower()
+                == "session"
+                else "sender"
+            ),
             silence_list=coerce.as_id_list((raw or {}).get("silence_list")),
             loop_breaker_enable=coerce.as_bool(loop.get("enable"), True),
             alternate_rounds=max(1, coerce.as_int(loop.get("alternate_rounds"), 4)),
@@ -145,6 +152,16 @@ class SessionState:
     """单个会话的可变状态。重启即清空——闸门不需要跨重启记忆。"""
 
     consecutive_drops: int = 0
+    """会话级连丢计数，**只用于日志**。"""
+
+    sender_drops: dict[str, int] = field(default_factory=dict)
+    """发送者级连丢计数，**连续丢弃兜底看这个**。
+
+    2026-10-07 真机实测后改的：会话级计数会让一个热闹的群变成「每 N 条必插一句」——
+    群里 8 个人各说一句、彼此不相关，计数照样累加。
+    设计文档的动机是「**对方**连发 3 条一条都不回」，那必须是同一个人。
+    """
+
     muted_until: float = 0.0
     mute_reason: str = ""
     senders: deque[str] = field(default_factory=deque)
@@ -155,6 +172,19 @@ class SessionState:
 
     def muted_left(self, now: float) -> float:
         return max(0.0, self.muted_until - now)
+
+    def dropped_from(self, sender_id: str) -> int:
+        return self.sender_drops.get(sender_id, 0)
+
+    def note_drop(self, sender_id: str) -> None:
+        self.consecutive_drops += 1
+        if sender_id:
+            self.sender_drops[sender_id] = self.sender_drops.get(sender_id, 0) + 1
+
+    def note_answered(self, sender_id: str) -> None:
+        self.consecutive_drops = 0
+        if sender_id:
+            self.sender_drops.pop(sender_id, None)
 
 
 class Gate:
@@ -224,7 +254,7 @@ class Gate:
         if sleeping:
             if addressed or not cfg.sleep_queue_only_addressed:
                 if cfg.sleep_queue_enable:
-                    state.consecutive_drops = 0
+                    state.note_answered(info.sender_id)
                     return GateDecision(
                         Action.QUEUE,
                         REASON_SLEEP_QUEUED,
@@ -273,20 +303,27 @@ class Gate:
             base = cfg.base_probability.get(info.kind.value, 0.0)
             probability = min(1.0, max(0.0, base * activity))
 
-        # 6) 连续丢弃上限：已经连着丢够了，这条必回
-        if cfg.consecutive_drop_limit and state.consecutive_drops >= cfg.consecutive_drop_limit:
-            state.consecutive_drops = 0
-            return GateDecision(
-                Action.ALLOW,
-                REASON_CONSECUTIVE_FLOOR,
-                max(probability, 1.0),
-                activity,
-                info.kind,
-                f"已连续丢 {cfg.consecutive_drop_limit} 条，本条强制放行",
-            )
+        # 6) 连续丢弃上限：同一个人连着被无视够多次了，这条必回
+        if cfg.consecutive_drop_limit:
+            if cfg.consecutive_drop_scope == "session":
+                dropped = state.consecutive_drops
+                who = "本会话"
+            else:
+                dropped = state.dropped_from(info.sender_id)
+                who = "该发送者"
+            if dropped >= cfg.consecutive_drop_limit:
+                state.note_answered(info.sender_id)
+                return GateDecision(
+                    Action.ALLOW,
+                    REASON_CONSECUTIVE_FLOOR,
+                    max(probability, 1.0),
+                    activity,
+                    info.kind,
+                    f"{who}已连续被丢 {dropped} 条，本条强制放行",
+                )
 
         if probability >= 1.0 or self._rng.random() < probability:
-            state.consecutive_drops = 0
+            state.note_answered(info.sender_id)
             return GateDecision(Action.ALLOW, REASON_ALLOW, probability, activity, info.kind, "")
 
         return self._drop(
@@ -310,8 +347,11 @@ class Gate:
         activity: float,
         detail: str,
     ) -> GateDecision:
-        state.consecutive_drops += 1
-        tail = f"（已连丢 {state.consecutive_drops} 条）"
+        state.note_drop(info.sender_id)
+        if self.config.consecutive_drop_scope == "session":
+            tail = f"（本会话已连丢 {state.consecutive_drops} 条）"
+        else:
+            tail = f"（该发送者已连丢 {state.dropped_from(info.sender_id)} 条）"
         return GateDecision(
             Action.DROP, reason, probability, activity, info.kind, f"{detail}{tail}"
         )
