@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>主动开口 · life</title>
+<title>闸门设置 · life</title>
 <style>
   *{box-sizing:border-box}
   :root{
@@ -107,24 +107,36 @@
     select{min-width:150px}
     .flabel{min-width:160px}
   }
+  /* 页内 tab（纯前端切显隐，控件始终在 DOM 里） */
+  .tabs{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 14px}
+  .tab{font:inherit;color:var(--tx2);background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:8px 16px;cursor:pointer}
+  .tab:hover{background:var(--card2);color:var(--tx)}
+  .tab.active{background:var(--ac);border-color:var(--ac);color:#fff}
+  .tab .tdot{display:none;width:7px;height:7px;border-radius:50%;background:var(--wn);margin-left:7px;vertical-align:middle}
+  .tab.dirty .tdot{display:inline-block}
+  .tab.active .tdot{background:#fff}
+  .tabpanel{display:none}
+  .tabpanel.active{display:block}
 </style>
 </head>
 <body>
 <div class="wrap">
   <header class="head">
     <div class="row">
-      <h1>主动开口</h1>
+      <h1>闸门设置</h1>
       <span id="ver" class="ver"></span>
     </div>
-    <p class="sub">拟人化闸门 —— 按作息概率放行消息，被点名分档回复，防两个 bot 互刷烧 token。本页管：机器人自己找话题说话（默认关闭，填了白名单才生效，睡眠时段绝不开口）。</p>
+    <p class="sub">拟人化闸门 —— 按作息概率放行消息，被点名分档回复，防两个 bot 互刷烧 token。上面 4 个标签页分别是：基础闸门 / 回话策略 / 防刷与睡眠 / 主动开口；本页只保存这 4 个板块的字段。</p>
     <div id="errBar" class="errbar" hidden></div>
   </header>
+
+  <div class="tabs" id="tabs" role="tablist" aria-label="设置板块"></div>
 
   <div id="groups"></div>
 
   <div class="card">
     <p class="note">
-      本页<b>只保存本页的字段</b>：在别的页面保存不会覆盖这里的设置，反之亦然；作息曲线 / 插值半径 / 周末系数在「作息活跃度」页面调整。
+      本页<b>只保存这 4 个板块的 48 个字段</b>：在别的页面保存不会覆盖这里的设置，反之亦然；作息曲线 / 插值半径 / 周末系数在「作息活跃度」页面调整。切标签页不会丢未保存的修改。
     </p>
   </div>
 
@@ -152,7 +164,82 @@
   var errMsg = function (e) { return (e && (e.message || e.error)) ? String(e.message || e.error) : String(e); };
 
   /* ==================== 字段定义（键名与 _conf_schema.json 一致） ==================== */
-  var GROUPS = [
+  // 下面的卡片就是原来 4 个页面的卡片，字段定义一字节未改；SECTIONS 决定每张卡属于哪个 tab。
+  var CARDS = [
+    {
+      title: '基础',
+      desc: '总开关与基础概率。实际放行概率 ≈ 基础概率 × 该时刻的作息权重（被 @ / 私聊走自己的档）。',
+      fields: [
+        { path: 'enable', type: 'bool', label: '总开关', def: true, desc: '关掉后插件完全不介入，消息全部原样放行。' },
+        { path: 'verbose_log', type: 'bool', label: '每次「已读不回」打日志', def: true, desc: '排障必开：日志里会写明消息是被哪一层丢掉的。' },
+        { path: 'debug_timing', type: 'bool', label: '延迟埋点（时序日志）', def: false, desc: '把每条被处理消息的时序（平台发出 → 开始处理 → 判定 → 进入发送 → 延时结束）写进 plugin_data/life/timing.jsonl，用来定位「放行之后到真正发送」之间的滞后。默认关闭，开了才会写文件。' },
+        { path: 'base_probability.chime', type: 'number', label: '群聊插话基础概率', def: 0.03, min: 0, max: 1, step: 0.01, desc: '没 @ 它时的开口概率。真机实测 0.1 在活跃群里太吵。' },
+        { path: 'base_probability.proactive', type: 'number', label: '主动开口基础概率（闸门档，当前备用）', def: 0.3, min: 0, max: 1, step: 0.01, desc: '没人问它、它自己想说话时用这一档。主动开口目前走下面「主动开口」组的可打扰度概率表，这里的基础概率暂不参与；保留是为了闸门语义完整。' },
+        { path: 'base_probability.addressed', type: 'number', label: '被 @ / 私聊基础概率', def: 1.0, min: 0, max: 1, step: 0.01, locked: true, desc: '恒为 1.0，不参与乘法，只用于延迟计算；睡眠时段走排队补发。' },
+      ]
+    },
+    {
+      title: '连丢、范围与名单',
+      desc: '防止「连发三条一条都不回」，并限定插件对哪些会话、哪些发送者生效。',
+      fields: [
+        { path: 'consecutive_drop_limit', type: 'number', label: '同一发送者最多连续被丢', def: 3, min: 0, max: 99, step: 1, unit: '条', desc: '防止「连发三条一条都不回」。0 = 关闭该保护。' },
+        { path: 'consecutive_drop_scope', type: 'select', label: '连丢计数范围', def: 'sender', options: [['sender', '按发送者（推荐）'], ['session', '按会话（整群共用）']], desc: '按发送者：群里很多人各说一句不会误触发；按会话：容易让机器人变吵。' },
+        { path: 'silence_list', type: 'textarea', label: '静默名单', def: [], rows: 3, placeholder: '一行一个 QQ 号，也可用逗号分隔', desc: '名单内发送者的消息直接已读不回，不进 LLM（不花 token）。' },
+        { path: 'session_whitelist', type: 'textarea', label: '会话白名单（umo）', def: [], rows: 3, placeholder: '留空 = 对所有会话生效', desc: '只对这些 unified_msg_origin 生效，方便先在测试群里试。' },
+      ]
+    },
+    {
+      title: '被点名分档',
+      desc: '被 @ 或私聊时，按当前活跃度决定「立刻回」还是「攒一波统一回」。',
+      fields: [
+        { path: 'addressed_max_age_seconds', type: 'number', label: '被点名消息时效上限（秒）', def: 180, min: 0, max: 86400, step: 1, unit: '秒', clamp: true, desc: '被 @ / 私聊 的消息如果轮到时已经过去超过这个秒数，就直接不回（0 = 关闭）。防止机器人被长上下文拖住后，把几十分钟前的旧消息翻出来重答。' },
+        { path: 'addressed_reply.enable', type: 'bool', label: '启用分档', def: true, desc: '关掉就永远立刻回。' },
+        { path: 'addressed_reply.immediate_threshold', type: 'number', label: '立刻回复的活跃度阈值', def: 0.6, min: 0, max: 1, step: 0.05, desc: '活跃度 ≥ 此值：立刻回。低于此值：攒一个窗口再统一回一次。' },
+        { path: 'addressed_reply.batch_window_seconds', type: 'number', label: '攒消息窗口', def: 120, min: 0, max: 3600, step: 1, unit: '秒', desc: '低活跃度时攒多久统一回。窗口内后到的消息并进同一次回复，不额外花 token。' },
+        { path: 'addressed_reply.batch_max_messages', type: 'number', label: '一次最多合并', def: 10, min: 1, max: 100, step: 1, unit: '条', desc: '超出的只保留最新的，旧的标明还有几条没看。' },
+      ]
+    },
+    {
+      title: '回复延迟',
+      desc: '替代 0.5 秒秒回，让它像个活人而不是接口。',
+      fields: [
+        { path: 'reply_delay.enable', type: 'bool', label: '启用回复延迟', def: true },
+        { path: 'reply_delay.min_seconds', type: 'number', label: '最小延迟', def: 1, min: 0, max: 600, step: 0.5, unit: '秒' },
+        { path: 'reply_delay.max_seconds', type: 'number', label: '最大延迟', def: 8, min: 0, max: 600, step: 0.5, unit: '秒', desc: '原来的默认 30 太夸张，真机实测后改成 8。' },
+        { path: 'reply_delay.activity_penalty', type: 'number', label: '低活跃度额外延迟系数', def: 0.35, min: 0, max: 2, step: 0.05, desc: '额外延迟 = (1 − 活跃度) × (max − min) × 本系数。0 = 延迟与活跃度无关。' },
+        { path: 'reply_delay.sleep_extra_seconds', type: 'number', label: '睡眠时段额外延迟', def: 20, min: 0, max: 600, step: 1, unit: '秒' }
+      ]
+    },
+    {
+      title: '会话冷却',
+      desc: '同一会话短时间内已经回过 N 次，就暂时已读不回（防刷屏兜底）。',
+      fields: [
+        { path: 'session_cooldown.enable', type: 'bool', label: '会话冷却', def: true, desc: '启用后，同一会话短时间内已回过 N 次就暂时已读不回（防刷屏兜底）。' },
+        { path: 'session_cooldown.window_seconds', type: 'number', label: '冷却窗口', def: 60, min: 1, max: 3600, step: 1, unit: '秒' },
+        { path: 'session_cooldown.max_replies', type: 'number', label: '窗口内最多回', def: 3, min: 1, max: 50, step: 1, unit: '条' },
+        { path: 'session_cooldown.exempt_addressed', type: 'bool', label: '被点名时豁免冷却', def: true, desc: '不建议关：关了会在对方连问时变哑巴。' }
+      ]
+    },
+    {
+      title: '睡眠队列',
+      desc: '睡眠时段（权重 0）来的消息不丢，排队到早上补发。',
+      fields: [
+        { path: 'sleep_queue.enable', type: 'bool', label: '启用排队补发', def: true },
+        { path: 'sleep_queue.flush_at_hour', type: 'number', label: '起床补发整点', def: 8, min: 0, max: 23, step: 1, unit: '点' },
+        { path: 'sleep_queue.only_addressed', type: 'bool', label: '只补发被点名的', def: true, desc: '群聊闲聊直接丢，避免早上倒垃圾。' },
+        { path: 'sleep_queue.max_per_session', type: 'number', label: '每会话最多留', def: 5, min: 1, max: 50, step: 1, unit: '条', desc: '半夜连发十条不会早上全部重放，只留最新的。' }
+      ]
+    },
+    {
+      title: '循环熔断',
+      desc: '两个 bot 互相回复会疯狂烧 token；检测到 ID 交替发言就静默一会儿。',
+      fields: [
+        { path: 'loop_breaker.enable', type: 'bool', label: '启用循环熔断', def: true },
+        { path: 'loop_breaker.alternate_rounds', type: 'number', label: '判定交替轮数', def: 4, min: 2, max: 50, step: 1, unit: '轮' },
+        { path: 'loop_breaker.silence_minutes', type: 'number', label: '熔断后静默', def: 30, min: 1, max: 1440, step: 1, unit: '分钟' },
+        { path: 'loop_breaker.exempt_addressed', type: 'bool', label: '被点名豁免熔断', def: true, desc: '避免真人在 @ 时变哑巴。' }
+      ]
+    },
     {
       title: '主动开口',
       desc: '机器人自己找话题说话。默认关闭；填了白名单才会生效，且睡眠时段绝不开口（作息表说了算）。',
@@ -177,9 +264,17 @@
     }
   ];
 
+  var SECTIONS = [
+    { id: 'base', name: '基础闸门', cardIdx: [0, 1] },
+    { id: 'reply', name: '回话策略', cardIdx: [2, 3] },
+    { id: 'anti', name: '防刷与睡眠', cardIdx: [4, 5, 6] },
+    { id: 'proact', name: '主动开口', cardIdx: [7] }
+  ];
+
 
   /* ==================== DOM ==================== */
   var groupsEl = $('#groups');
+  var tabsEl = $('#tabs');
   var errBar = $('#errBar');
   var verEl = $('#ver');
   var dirtyHint = $('#dirtyHint');
@@ -190,6 +285,7 @@
   var ctrls = {};       // path -> { el, f, meta }
   var server = {};      // 服务器上的配置（嵌套结构）
   var busy = false;
+  var activeTab = 'base';
 
   /* ==================== 取值工具 ==================== */
   function getPath(obj, path) {
@@ -287,7 +383,7 @@
   }
 
   /* ==================== 渲染 ==================== */
-  function buildField(f) {
+  function buildField(f, secId) {
     var wrap = document.createElement('div');
     wrap.className = 'field';
     if (f.type === 'textarea' || f.type === 'text') wrap.className += ' wide';   // 名单/长文本整行铺开，方便粘贴一堆 QQ 号、umo 或长提示词
@@ -344,7 +440,7 @@
       }
     }
 
-    el.id = 'f_' + f.path.replace(/\./g, '_');
+    el.id = 'f_' + secId + '__' + f.path.replace(/\./g, '_');   // 带板块前缀，避免跨板块 id 串台
     if (f.locked) {
       el.disabled = true;
       el.title = '该项固定为 ' + f.def + '，不可编辑';
@@ -370,21 +466,32 @@
     return wrap;
   }
 
+  function buildCard(g, secId) {
+    var card = document.createElement('section');
+    card.className = 'card';
+    var h = document.createElement('h2');
+    h.textContent = g.title;
+    var d = document.createElement('p');
+    d.className = 'gdesc';
+    d.textContent = g.desc;
+    card.appendChild(h);
+    card.appendChild(d);
+    g.fields.forEach(function (f) { card.appendChild(buildField(f, secId)); });
+    return card;
+  }
+
+  // 4 个板块的表单一次性全部渲染进 DOM，切 tab 只切 display —— 所以切走再切回不会丢未保存的修改，
+  // 保存时也自然是「按全部板块取值」。
   function buildForm() {
     groupsEl.innerHTML = '';
     ctrls = {};
-    GROUPS.forEach(function (g) {
-      var card = document.createElement('section');
-      card.className = 'card';
-      var h = document.createElement('h2');
-      h.textContent = g.title;
-      var d = document.createElement('p');
-      d.className = 'gdesc';
-      d.textContent = g.desc;
-      card.appendChild(h);
-      card.appendChild(d);
-      g.fields.forEach(function (f) { card.appendChild(buildField(f)); });
-      groupsEl.appendChild(card);
+    SECTIONS.forEach(function (sec) {
+      var panel = document.createElement('section');
+      panel.className = 'tabpanel';
+      panel.setAttribute('data-tab', sec.id);
+      panel.setAttribute('role', 'tabpanel');
+      sec.cardIdx.forEach(function (i) { panel.appendChild(buildCard(CARDS[i], sec.id)); });
+      groupsEl.appendChild(panel);
     });
   }
 
@@ -450,11 +557,60 @@
     btnSave.classList.toggle('dirty', dirty && !busy);
     dirtyHint.textContent = dirty ? '有未保存的修改' : '没有未保存的修改';
     dirtyHint.classList.toggle('on', dirty);
+    // 哪个板块有未保存的修改，就在它的 tab 上点一颗小黄点
+    Array.prototype.forEach.call(tabsEl.querySelectorAll('.tab'), function (b) {
+      var sec = SECTIONS.filter(function (s) { return s.id === b.getAttribute('data-tab'); })[0];
+      b.classList.toggle('dirty', !!sec && sectionDirty(sec));
+    });
   }
 
   function onAnyInput() {
     Object.keys(ctrls).forEach(refreshField);
     updateDirtyUI();
+  }
+
+  /* ==================== 板块 tab ==================== */
+  function buildTabs() {
+    tabsEl.innerHTML = '';
+    SECTIONS.forEach(function (sec) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'tab';
+      b.setAttribute('role', 'tab');
+      b.setAttribute('data-tab', sec.id);
+      b.textContent = sec.name;
+      b.appendChild(document.createElement('span')).className = 'tdot';
+      b.addEventListener('click', function () { showTab(sec.id); });
+      tabsEl.appendChild(b);
+    });
+  }
+
+  function showTab(id) {
+    activeTab = id;
+    Array.prototype.forEach.call(groupsEl.querySelectorAll('.tabpanel'), function (p) {
+      p.classList.toggle('active', p.getAttribute('data-tab') === id);
+    });
+    Array.prototype.forEach.call(tabsEl.querySelectorAll('.tab'), function (b) {
+      var on = b.getAttribute('data-tab') === id;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+  }
+
+  function sectionKeys(sec) {
+    var keys = [];
+    sec.cardIdx.forEach(function (i) {
+      CARDS[i].fields.forEach(function (f) { keys.push(f.path); });
+    });
+    return keys;
+  }
+
+  function sectionDirty(sec) {
+    return sectionKeys(sec).some(function (path) {
+      var rec = ctrls[path];
+      if (!rec) return false;
+      return normKey(rec.f, readCtrl(rec.f)) !== normKey(rec.f, getPath(server, path));
+    });
   }
 
   /* ==================== 提交 ==================== */
@@ -534,7 +690,9 @@
   }
 
   function rebuild() {
+    buildTabs();
     buildForm();
+    showTab(activeTab);
     applyValues();
   }
 
