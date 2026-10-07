@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+import types
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -34,14 +35,20 @@ UMO = "aiocqhttp:GroupMessage:100"
 
 
 class _MsgObj:
-    """只为 message_obj.timestamp 存在的假对象。"""
+    """只为 message_obj.timestamp / raw_message 存在的假对象。"""
 
-    def __init__(self, timestamp: float = 0.0) -> None:
+    def __init__(self, timestamp: float = 0.0, raw_message=None) -> None:
         self.timestamp = timestamp
+        self.raw_message = raw_message
 
 
 class FakeEvent:
-    """够用的假事件：只实现 main.py 真正调用的方法。"""
+    """够用的假事件：只实现 main.py 真正调用的方法。
+
+    两个时间来源可以**独立**控制（对应真机上语义不同的两个字段）：
+    - ``raw_event={"time": ...}`` → ``message_obj.raw_message``：平台发出的时间（OneBot v11）
+    - ``message_ts=...`` → ``message_obj.timestamp``：AstrBot 收到/转换完的时间
+    """
 
     def __init__(
         self,
@@ -55,6 +62,7 @@ class FakeEvent:
         sender_name: str = "某人",
         with_result: bool = True,
         message_ts: float = 0.0,
+        raw_event=None,
     ) -> None:
         self.unified_msg_origin = umo
         self.is_at_or_wake_command = at_or_wake
@@ -63,7 +71,7 @@ class FakeEvent:
         self._private = private
         self.message_str = text
         self._name = sender_name
-        self.message_obj = _MsgObj(message_ts)
+        self.message_obj = _MsgObj(message_ts, raw_event)
         self._stopped = False
         self._result = object() if with_result else None
 
@@ -452,13 +460,108 @@ class TestSafetyWiring(WiringTestBase):
         self.assertEqual(snapshot["allows"], 0)
 
 
+class TestSentAtFallback(unittest.TestCase):
+    """``_message_sent_at`` 的回退链：原始事件 ``time``（平台发出）→ ``message_obj.timestamp``（接收）→ 0。
+
+    语义要点（2026-10-07 真机教训）：``message_obj.timestamp`` 在 AstrBot 4.28.2 上
+    **永远有值**，但它是「AstrBot 收到/转换完」的时间（``AstrBotMessage.__init__`` 就写了
+    ``int(time.time())``）。所以必须先取原始事件里的 OneBot ``time``（真正的平台发出时间），
+    否则量到的只是「收下之后过了多久」，时效闸门几乎恒不触发。
+    """
+
+    def sent_at(self, **kwargs):
+        return plugin_main.ReplyGate._message_sent_at(FakeEvent(**kwargs))
+
+    def test_prefers_raw_event_time_over_message_obj_timestamp(self):
+        # raw time = 平台发出（旧），timestamp = AstrBot 接收（新）→ 必须取旧的那个
+        self.assertEqual(self.sent_at(message_ts=2000.0, raw_event={"time": 1000.0}), 1000.0)
+
+    def test_falls_back_to_message_obj_timestamp(self):
+        # 适配器不把原始事件挂上来（没有 raw_message / 没有 time）→ 退回接收时间
+        self.assertEqual(self.sent_at(message_ts=1234.0), 1234.0)
+        self.assertEqual(self.sent_at(message_ts=1234.0, raw_event={"post_type": "message"}), 1234.0)
+
+    def test_raw_event_attribute_access(self):
+        raw = types.SimpleNamespace(time=4321.0)
+        self.assertEqual(self.sent_at(message_ts=9999.0, raw_event=raw), 4321.0)
+
+    def test_raw_event_time_milliseconds_normalised(self):
+        self.assertEqual(
+            self.sent_at(message_ts=9999.0, raw_event={"time": 1_700_000_000_000}),
+            1_700_000_000.0,
+        )
+
+    def test_broken_raw_time_falls_through_to_message_obj_timestamp(self):
+        self.assertEqual(self.sent_at(message_ts=99.0, raw_event={"time": "坏值"}), 99.0)
+
+    def test_zero_raw_time_falls_through_to_message_obj_timestamp(self):
+        # OneBot 的 time=0 等于「没有」：不能当成 1970 年把真人误杀，也不能挡住兜底
+        self.assertEqual(self.sent_at(message_ts=77.0, raw_event={"time": 0}), 77.0)
+
+    def test_all_sources_missing_returns_zero(self):
+        self.assertEqual(self.sent_at(), 0.0)  # timestamp 0 + 没有 raw_message
+        self.assertEqual(self.sent_at(raw_event={"time": 0}), 0.0)
+        self.assertEqual(self.sent_at(raw_event="不是 dict，也不是对象"), 0.0)
+
+    def test_raw_time_wins_so_age_reflects_real_message_age(self):
+        """修语义的目的：age 必须由平台发出时间决定。"""
+        now = time.time()
+        event = FakeEvent(message_ts=now - 2, raw_event={"time": now - 400})
+        age = now - plugin_main.ReplyGate._message_sent_at(event)
+        self.assertGreater(age, 180.0)  # 接收时间只有 2 秒（闸门不会动），发出时间 400 秒
+
+
 class TestStaleAddressedWiring(WiringTestBase):
-    async def test_stale_addressed_is_stopped(self):
+    """时效闸门端到端：age 由**平台发出时间**（raw time）决定，接收时间只做兜底。"""
+
+    async def test_raw_time_is_primary_source(self):
+        # 平台发出 600 秒前、AstrBot 才刚收到（接收时间只差 2 秒）→ 必须按 600 秒拦下
+        plugin = self.build(addressed_max_age_seconds=180.0)
+        event = FakeEvent(
+            at_or_wake=True,
+            message_ts=time.time() - 2,
+            raw_event={"time": time.time() - 600},
+        )
+        await plugin.gate(event)
+        self.assertTrue(event.is_stopped())
+        # 证明是 gate.py 的 stale_addressed 分支触发的（age > addressed_max_age_seconds）
+        self.assertTrue(
+            any("stale_addressed" in line for line in LOGGER.messages()),
+            LOGGER.messages(),
+        )
+
+    async def test_stale_via_raw_event_time_only(self):
+        # 只有原始事件的 time（接收时间缺失）也要能拦住旧消息
+        plugin = self.build(addressed_max_age_seconds=180.0)
+        event = FakeEvent(at_or_wake=True, raw_event={"time": time.time() - 600})
+        await plugin.gate(event)
+        self.assertTrue(event.is_stopped())
+        self.assertTrue(any("stale_addressed" in line for line in LOGGER.messages()))
+
+    async def test_raw_time_fresh_beats_stale_receive_timestamp(self):
+        # 反向：平台 5 秒前发出、但接收时间很旧（管线排队/时钟差）→ 新版必须放行
+        plugin = self.build(addressed_max_age_seconds=180.0)
+        event = FakeEvent(
+            at_or_wake=True,
+            message_ts=time.time() - 600,
+            raw_event={"time": time.time() - 5},
+        )
+        await plugin.gate(event)
+        self.assertFalse(event.is_stopped())
+
+    async def test_stale_via_message_obj_timestamp_fallback(self):
+        # 适配器没挂原始事件时，退化成接收时间也要能拦住旧消息
         plugin = self.build(addressed_max_age_seconds=180.0)
         event = FakeEvent(at_or_wake=True, message_ts=time.time() - 600)
         await plugin.gate(event)
         self.assertTrue(event.is_stopped())
-        self.assertTrue(any("stale" in line for line in LOGGER.messages()))
+        self.assertTrue(any("stale_addressed" in line for line in LOGGER.messages()))
+
+    async def test_fresh_raw_event_time_passes(self):
+        plugin = self.build(addressed_max_age_seconds=180.0)
+        event = FakeEvent(at_or_wake=True, raw_event={"time": time.time() - 5})
+        await plugin.gate(event)
+        self.assertFalse(event.is_stopped())
 
     async def test_fresh_addressed_passes(self):
         plugin = self.build(addressed_max_age_seconds=180.0)
@@ -466,9 +569,10 @@ class TestStaleAddressedWiring(WiringTestBase):
         await plugin.gate(event)
         self.assertFalse(event.is_stopped())
 
-    async def test_platform_without_timestamp_is_not_punished(self):
+    async def test_no_platform_time_at_all_is_not_punished(self):
+        # raw time 和接收时间都拿不到 → sent_at=0 → 不做时效判定（绝不误杀真人）
         plugin = self.build(addressed_max_age_seconds=180.0)
-        event = FakeEvent(at_or_wake=True)  # message_ts 默认 0
+        event = FakeEvent(at_or_wake=True)  # message_ts 默认 0、没有 raw_event
         await plugin.gate(event)
         self.assertFalse(event.is_stopped())
 

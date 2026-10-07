@@ -28,6 +28,11 @@
    （waking_check/stage.py:128,149,158），是判断「被点名」的准确依据。
 
 **绝不调 save_config()**：写了就是纯内存，落了盘就等于把当轮的随机结果焊进配置。
+
+``debug_timing``（默认关）：把每条被处理消息的时序写进
+``plugin_data/life/timing.jsonl``，用来定位「我们放行之后到真正发送之间」的滞后
+（真机案例：21:53:07 发出的回复引用了 21:47:25 的消息，滞后 342 秒）。
+纯逻辑在 ``core/timing.py``，I/O 在下面的 ``TimingSink``；**埋点坏掉绝不影响闸门**。
 """
 from __future__ import annotations
 
@@ -35,6 +40,7 @@ import asyncio
 import random
 import time
 from datetime import datetime
+from pathlib import Path
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
@@ -43,6 +49,7 @@ from astrbot.core.message.components import Plain
 from astrbot.core.message.message_event_result import MessageChain
 
 from .core import batch as batch_mod, classify, coerce, queue as queue_mod, schedule
+from .core import timing as timing_mod
 from .core.delay import DelayConfig, reply_delay_seconds
 from .core.gate import Action, Gate, GateConfig, MessageInfo, MessageKind
 
@@ -56,6 +63,88 @@ PLUGIN_VERSION = "v0.4.0"
 GATE_PRIORITY = 996
 
 FLUSH_TICK_SECONDS = 30
+
+# 埋点挂载在事件对象上的键（优先用 AstrBot 的 extras，退化成私有属性）
+TIMING_EXTRA_KEY = "life_timing"
+TIMING_FILE_NAME = "timing.jsonl"
+
+
+class TimingSink:
+    """``debug_timing`` 的 jsonl 写入端（I/O 只在这里，纯逻辑在 core/timing.py）。
+
+    - 路径：``get_astrbot_data_path()/plugin_data/life/timing.jsonl``（目录不存在就建）。
+    - **任何异常一律吞掉并打一条 warning**：埋点是排障工具，绝不能因为它把闸门搞崩。
+    - 行数 > 2000 或体积 > 512KB 时清空重写，只保留最近的一半
+      （见 ``core/timing.trim_lines`` 的注释）。
+    - 单行 append 很小，直接同步写即可，不做后台线程/大 buffering。
+    """
+
+    def __init__(self, path: str | Path | None = None) -> None:
+        self._path = Path(path) if path is not None else None  # 注入路径只为单测
+        self._resolved: Path | None = None
+        # 惰性数一次行数，之后自己累加：避免每次写都读整个文件
+        self._lines: int | None = None
+
+    def path(self) -> Path:
+        if self._path is not None:
+            return self._path
+        if self._resolved is None:
+            from astrbot.core.utils.astrbot_path import get_astrbot_data_path
+
+            self._resolved = (
+                Path(get_astrbot_data_path()) / "plugin_data" / PLUGIN_NAME / TIMING_FILE_NAME
+            )
+        return self._resolved
+
+    def write(self, record) -> bool:
+        """追加一行。成功 True；任何失败 False（并打 warning），**绝不抛给调用方**。"""
+        try:
+            line = timing_mod.encode_record(record)
+            path = self.path()
+            self._prepare(path)
+            self._append(path, line)
+        except Exception as exc:
+            logger.warning("[%s] 延迟埋点写入失败（已忽略，不影响闸门）：%s", PLUGIN_NAME, exc)
+            return False
+        self._lines = (self._lines or 0) + 1
+        return True
+
+    # ---- 内部（单测里 monkeypatch _append 就能模拟 I/O 失败） -------------
+    def _prepare(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if self._lines is None:
+            self._lines = self._count_lines(path)
+        if timing_mod.needs_rotate(self._lines, self._size(path)):
+            self._rotate(path)
+
+    def _append(self, path: Path, line: str) -> None:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+
+    def _rotate(self, path: Path) -> None:
+        """超限就清空重写，保留最近的一半。"""
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            text = ""
+        kept = timing_mod.trim_lines(timing_mod.decode_lines(text))
+        path.write_text(timing_mod.dump_lines(kept), encoding="utf-8")
+        self._lines = len(kept)
+
+    @staticmethod
+    def _size(path: Path) -> int:
+        try:
+            return path.stat().st_size
+        except OSError:
+            return 0
+
+    @staticmethod
+    def _count_lines(path: Path) -> int:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                return sum(1 for _ in handle)
+        except FileNotFoundError:
+            return 0
 
 
 @register(
@@ -79,6 +168,9 @@ class ReplyGate(Star):
         self._running = False
         self._last_flush_date = None
         self._warned: set[str] = set()
+        # 延迟埋点（debug_timing，默认关；开了才写文件）
+        self._timing_enabled = False
+        self._timing_sink = TimingSink()
         # 给插件页面看的运行计数（不持久化，重启归零）
         self._stats = {"drops": 0, "allows": 0, "queued": 0, "flushed": 0, "batched": 0}
 
@@ -94,6 +186,12 @@ class ReplyGate(Star):
         self._enable = coerce.as_bool(raw.get("enable"), True)
         self._verbose = coerce.as_bool(raw.get("verbose_log"), True)
         self._session_whitelist = coerce.as_id_list(raw.get("session_whitelist"))
+
+        # 延迟埋点：默认关。开启/关闭只是加不加记录，判定行为一个字节都不变
+        was_timing = self._timing_enabled
+        self._timing_enabled = coerce.as_bool(raw.get("debug_timing"), False)
+        if self._timing_enabled and not was_timing:
+            self._log_timing_enabled()
 
         try:
             self._segments = schedule.parse_time_weights(
@@ -126,8 +224,119 @@ class ReplyGate(Star):
         self._queue.max_per_session = max(1, coerce.as_int(sleep_cfg.get("max_per_session"), 5))
 
     def stats_snapshot(self) -> dict:
-        """给插件页面读的运行计数。"""
+        """给插件页面读的运行计数。
+
+        **刻意不加埋点字段**：页面结构是另一处的事，埋点只落 jsonl + 一条 info 日志。
+        """
         return dict(self._stats)
+
+    # ------------------------------------------------------------------
+    # 延迟埋点（debug_timing；所有记录都不参与判定，只观察）
+    # ------------------------------------------------------------------
+    def _log_timing_enabled(self) -> None:
+        sink = getattr(self, "_timing_sink", None)
+        try:
+            where = str(sink.path()) if sink is not None else "（数据目录未解析）"
+        except Exception:
+            where = "（AstrBot 数据目录解析失败，写入时会重试）"
+        logger.info("[%s] debug_timing 已开启：每条消息的时序写入 %s", PLUGIN_NAME, where)
+
+    def _build_timing_record(
+        self, decision, *, info, event, umo, sender_id, kind, activity, t_wall, t_gate
+    ):
+        """构造一条时序记录（字段全集，取不到的留 None）。只在埋点开启时调用。"""
+        try:
+            return timing_mod.normalize_record(
+                {
+                    "t_recv": info.sent_at or None,
+                    "t_recv_wall": t_wall or None,
+                    "t_gate": t_gate,
+                    "umo": umo,
+                    "sender_id": sender_id,
+                    "kind": kind.value,
+                    "action": decision.action.value,
+                    "reason": decision.reason,
+                    "prob": round(float(decision.probability), 4),
+                    "activity": round(float(activity), 4),
+                    "message_id": self._message_id(event),
+                    "quoted_id": self._quoted_id(event),
+                }
+            )
+        except Exception as exc:  # 记录构造失败也不能影响闸门
+            logger.warning("[%s] 延迟埋点构造失败（已忽略）：%s", PLUGIN_NAME, exc)
+            return None
+
+    @staticmethod
+    def _message_id(event) -> str:
+        """平台消息 id；拿不到就空串。"""
+        try:
+            value = getattr(getattr(event, "message_obj", None), "message_id", "")
+        except Exception:
+            return ""
+        return "" if value in (None, "") else str(value)
+
+    @staticmethod
+    def _quoted_id(event) -> str:
+        """消息链里 Reply 组件引用的消息 id；没有引用 / 拿不到就空串。"""
+        try:
+            chain = getattr(getattr(event, "message_obj", None), "message", None)
+        except Exception:
+            return ""
+        return timing_mod.quoted_id_from_message_chain(chain)
+
+    def _stash_timing(self, event, record) -> None:
+        """把闸门阶段的记录挂到事件上，等装饰阶段补齐 t_decorate/delay/t_ready。
+
+        优先用 AstrBot 的事件 extras（同一 event 对象贯穿流水线），失败退化成私有属性。
+        挂不上就算了：埋点丢一行无所谓，绝不能因此抛异常。
+        """
+        if record is None:
+            return
+        try:
+            event.set_extra(TIMING_EXTRA_KEY, record)
+            return
+        except Exception:
+            pass
+        try:
+            setattr(event, TIMING_EXTRA_KEY, record)
+        except Exception:
+            pass
+
+    def _pop_timing(self, event):
+        """取走事件上挂的记录（取过就清掉，避免重复落盘）。"""
+        if not self._timing_enabled:
+            return None
+        try:
+            record = event.get_extra(TIMING_EXTRA_KEY, None)
+            if record is not None:
+                event.set_extra(TIMING_EXTRA_KEY, None)
+                return record
+        except Exception:
+            pass
+        record = getattr(event, TIMING_EXTRA_KEY, None)
+        if record is not None:
+            try:
+                setattr(event, TIMING_EXTRA_KEY, None)
+            except Exception:
+                pass
+        return record
+
+    def _write_timing(self, record) -> None:
+        """落盘一行。sink.write 自己吞异常，这里再包一层保险。"""
+        if record is None or not self._timing_enabled:
+            return
+        try:
+            self._timing_sink.write(record)
+        except Exception as exc:  # TimingSink 理论上不抛，双保险
+            logger.warning("[%s] 延迟埋点写入异常（已忽略）：%s", PLUGIN_NAME, exc)
+
+    def _finish_timing(self, record, *, delay=None, ready=None) -> None:
+        """补齐发送阶段的时间并落盘；没走到发送就留 null（t_decorate 也是 null）。"""
+        if record is None:
+            return
+        record["delay"] = delay
+        record["t_ready"] = ready
+        self._write_timing(record)
 
     # ------------------------------------------------------------------
     # 生命周期
@@ -233,6 +442,9 @@ class ReplyGate(Star):
             return
         self._start_flush_loop()  # 兜底：万一 initialize 没被调用
 
+        # 收到/开始处理这条事件的时间（和平台发出时间相减 = 平台侧积压）
+        t_wall = time.time() if self._timing_enabled else 0.0
+
         umo = event.unified_msg_origin
         if self._session_whitelist and umo not in self._session_whitelist:
             return
@@ -267,11 +479,31 @@ class ReplyGate(Star):
         )
         decision = self._gate.evaluate(info, activity=activity, sleeping=asleep)
 
+        # 判定完成的时间 + 本条的埋点记录（默认关闭时 t_gate 都不取，零副作用）
+        timing_rec = None
+        if self._timing_enabled:
+            timing_rec = self._build_timing_record(
+                decision,
+                info=info,
+                event=event,
+                umo=umo,
+                sender_id=sender_id,
+                kind=kind,
+                activity=activity,
+                t_wall=t_wall,
+                t_gate=time.time(),
+            )
+
         if decision.action is Action.DROP:
             self._stats["drops"] += 1
             event.stop_event()
             self._log_decision(decision, event, now)
+            self._write_timing(timing_rec)  # DROP 没有 t_allow，其余字段照记
             return
+
+        # 放行 / 入队 / 攒批：这一瞬间就是 t_allow（DROP 走不到这里）
+        if timing_rec is not None:
+            timing_rec["t_allow"] = time.time()
 
         if decision.action is Action.QUEUE:
             self._stats["queued"] += 1
@@ -297,6 +529,7 @@ class ReplyGate(Star):
                     decision.log_line(),
                     detail,
                 )
+            self._write_timing(timing_rec)  # 入队后不会走到发送，就地落盘
             return
 
         # 被点名：按活跃度分三档（睡眠那档已经在上面 return 了）
@@ -313,6 +546,13 @@ class ReplyGate(Star):
                     plan.buffered,
                     info.text[:40],
                 )
+                if timing_rec is not None:
+                    timing_rec["batch"] = {
+                        "lead": False,
+                        "wait": 0.0,
+                        "merged": plan.buffered,
+                    }
+                self._write_timing(timing_rec)  # 并进批次后本条不会发出去
                 return
             if plan.is_lead and plan.wait_seconds > 0:
                 logger.info(
@@ -325,6 +565,13 @@ class ReplyGate(Star):
                     info.text[:40],
                 )
                 await asyncio.sleep(plan.wait_seconds)
+                if timing_rec is not None:
+                    # 等待期间可能又有消息并进来，真正合并条数在 finish 之前才准
+                    timing_rec["batch"] = {
+                        "lead": True,
+                        "wait": plan.wait_seconds,
+                        "merged": self._batch.buffered(umo),
+                    }
                 merged = self._batch.finish(umo)
                 if merged:
                     event.message_str = merged  # 让 LLM 一次看到攒下的全部内容
@@ -351,6 +598,9 @@ class ReplyGate(Star):
                 "已顶到 1.0" if opened == 1.0 else ("无" if opened is None else f"{opened}"),
                 info.text[:40],
             )
+
+        # 还要过 LLM 和装饰阶段：记录挂在事件上，等 on_decorating_result 补齐再落盘
+        self._stash_timing(event, timing_rec)
 
     def _open_active_reply(self, event: AstrMessageEvent) -> float | None:
         """把内置 ``active_reply.possibility_reply`` 顶到 1.0，返回**回读值**。
@@ -418,11 +668,57 @@ class ReplyGate(Star):
     def _message_sent_at(event: AstrMessageEvent) -> float:
         """消息在平台上**发出**的时间（epoch 秒）。拿不到就返回 0 = 不做时效判定。
 
-        不能用 ``time.time()``：那是「我们才处理到它」的时间。长上下文把管线拖住几分钟后，
-        两者能差十几分钟 —— 群里抱怨的「翻旧消息重答」就是这么来的。
+        回退链（从上到下试，第一个能转成正数的就用）：
+
+        1. 原始事件里的 ``time`` —— **平台发出时间**，这才是我们要的。
+           OneBot v11 消息事件自带 ``time``（秒），aiocqhttp 把它挂在
+           ``message_obj.raw_message``（``aiocqhttp.Event`` 是 dict 子类，
+           ``event["time"]`` / ``event.get("time")`` 都行）。
+        2. ``event.message_obj.timestamp`` —— **AstrBot 收到/转换完这条消息的时间**，只做兜底。
+           实测（AstrBot 4.28.2，容器内已核对）：``AstrBotMessage.__init__`` 就写了
+           ``self.timestamp = int(time.time())``（astrbot_message.py:67-68），aiocqhttp 适配器
+           转换完还会再覆写一次（aiocqhttp_platform_adapter.py:421），所以它**永远有值**
+           —— 正因为如此，绝不能把它放第一位：那样第 1 条永远被挡住，我们量到的永远是
+           「AstrBot 收下之后过了多久」。
+        3. 都拿不到 → 0.0：不做时效判定，绝不误杀真人。
+
+        这两个来源对应两种完全不同的病（2026-10-07 真机教训）：
+        - 取**平台发出时间**：``age`` = 这条消息从发出到现在有多旧，平台 / NapCat 侧积压和
+          AstrBot 内部排队都算得进去 —— 时效闸门要的就是它。
+        - 取**接收时间**：``age`` 只等于「AstrBot 收下之后过了多久」，消息在到达我们之前的
+          那一段滞后整段消失；而接收时间是它刚进流水线的那一刻，``age`` 在处理前就很小，
+          于是闸门**几乎恒不触发**（点名的旧消息照样被回答）。这就是要避免的坑。
+
+        也不能用裸 ``time.time()`` 顶替：那是「我们才处理到它」的时间。
         """
+        message_obj = getattr(event, "message_obj", None)
+        raw_event = getattr(message_obj, "raw_message", None)
+        for raw in (
+            ReplyGate._raw_event_field(raw_event, "time"),  # 平台发出时间（优先）
+            getattr(message_obj, "timestamp", 0),  # AstrBot 接收时间（兜底）
+        ):
+            value = ReplyGate._as_epoch_seconds(raw)
+            if value > 0:
+                return value
+        return 0.0
+
+    @staticmethod
+    def _raw_event_field(raw_event, key: str):
+        """从原始平台事件里取字段。OneBot 的 Event 是 dict 子类，dict / 对象都兜住。"""
+        if raw_event is None:
+            return 0
         try:
-            raw = getattr(getattr(event, "message_obj", None), "timestamp", 0)
+            getter = getattr(raw_event, "get", None)
+            if callable(getter):
+                return getter(key, 0)
+            return getattr(raw_event, key, 0)
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _as_epoch_seconds(raw) -> float:
+        """转 epoch 秒。转不了 → 0.0；毫秒（> 1e11）统一换算成秒。"""
+        try:
             value = float(raw or 0)
         except (TypeError, ValueError):
             return 0.0
@@ -445,16 +741,28 @@ class ReplyGate(Star):
 
         只做延迟，不碰 @ 和引用的插入——那是 astrbot_plugin_at_inline 的职责。
         """
+        # 闸门阶段挂上来的埋点记录（默认关闭时是 None，零副作用）
+        pending = self._pop_timing(event)
+        entered = time.time() if (pending is not None or self._timing_enabled) else 0.0
+
         if not self._enable:
+            self._finish_timing(pending)  # 处理过但没发送：t_decorate 留 null
             return
         if event.is_stopped() or event.get_result() is None:
+            self._finish_timing(pending)
             return
         umo = event.unified_msg_origin
         if self._session_whitelist and umo not in self._session_whitelist:
+            self._finish_timing(pending)
             return
+
+        # 真的要走发送，才记「进入 on_decorating_result 的时间」
+        if pending is not None:
+            pending["t_decorate"] = entered
 
         # 延迟是可选的，但会话冷却的计时不受它开关影响：
         # 关了延迟也得记「刚回过一条」，否则冷却永远不触发。
+        delay = 0.0
         if self._delay_cfg.enable:
             now = datetime.now()
             activity = schedule.activity_ratio(
@@ -480,6 +788,10 @@ class ReplyGate(Star):
                         "，睡眠中" if asleep else "",
                     )
                 await asyncio.sleep(seconds)
+                delay = seconds  # 实际睡了多少秒（0 = 没睡）
 
         # 真的发出去一条，才计入会话冷却
         self._gate.record_reply(umo)
+
+        # 延时结束、准备交给 AstrBot 发送：这条时序到这里就齐了，落盘
+        self._finish_timing(pending, delay=delay, ready=time.time())

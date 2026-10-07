@@ -209,5 +209,10 @@
     "description": "每次「已读不回」都打日志（排障必开）",
     "type": "bool",
     "default": true
+  },
+  "debug_timing": {
+    "description": "延迟埋点：把每条被处理消息的时序（平台发出时间 → 我们开始处理 → 判定 → 进入发送 → 延时结束）写进 plugin_data/life/timing.jsonl，用来定位「放行之后到真正发送」之间的滞后。默认关闭，开了才会写文件",
+    "type": "bool",
+    "default": false
   }
 }

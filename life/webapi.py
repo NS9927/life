@@ -57,6 +57,7 @@ SETTINGS_KEYS = frozenset(
         "loop_breaker",
         "addressed_reply",
         "addressed_max_age_seconds",
+        "debug_timing",
     }
 )
 
