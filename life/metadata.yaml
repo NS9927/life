@@ -1,8 +1,8 @@
 name: "life"
-display_name: "life（回复闸门）"
+display_name: "拟人"
 author: "NS9927"
 version: "v0.4.0"
-desc: "拟人化闸门：作息时段按概率放行消息（凌晨不发、晚上多发），并对被点名消息做睡眠排队；同时提供静默名单与循环熔断，防止两个 bot 互相回复烧 token。"
+desc: "让机器人像真人一样作息与回话：按时段活跃度概率放行消息（凌晨不发、晚上多发），被点名按活跃度分档（高→立刻回 / 低→攒一波统一回 / 睡眠→起床补发），并提供静默名单、循环熔断与会话冷却，防止两个 bot 互刷烧 token。"
 repo: "https://github.com/NS9927/life"
 astrbot_version: ">=4.24.0"
 support_platforms:

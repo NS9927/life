@@ -150,7 +150,7 @@ class TimingSink:
 @register(
     PLUGIN_NAME,
     "NS9927",
-    "作息概率放行 + 已读不回（防两个 bot 互刷烧 token）",
+    "拟人：按作息概率放行消息、被点名分档回复，防两个 bot 互刷烧 token",
     PLUGIN_VERSION,
 )
 class ReplyGate(Star):
