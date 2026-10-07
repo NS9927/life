@@ -1,33 +1,44 @@
 #!/bin/bash
 # 按 docs/真机反馈与根因分析.md 的建议，收敛「爬楼逐条补回复 / 即时消息不回」。
 #
-# 用法（在 PowerShell 里）：
-#   dry-run（默认，只看 diff，不写）：
+# 用法（PowerShell）：
+#   看 diff（默认，不写）：
 #     wsl -d Ubuntu-24.04 -u root -e bash /mnt/c/Users/<你的用户目录>/Projects/life/scripts/apply_feedback_config.sh
-#   真改（会先备份，再重启 AstrBot）：
-#     wsl -d Ubuntu-24.04 -u root -e bash .../apply_feedback_config.sh --apply
+#   真改（先备份再写，然后重启 AstrBot）：
+#     ... apply_feedback_config.sh --apply
 #
-# 改什么：
-#   1. 关掉 astrbot_plugin_group_context_flow 的注入（保留内置那份，life 的插话正靠内置 active_reply）
-#   2. 群历史注入窗口 700 -> 150、group_message_max_cnt 1000 -> 200
-#   3. reply_with_quote true -> false（最能消除「他在翻前面的一个个回」的观感）
-#   4. segmented_reply.words_count_threshold 400 -> 2000（否则一次回答仍会被拆成多条）
+# 群上下文注入只能留一个，用第二个参数选（默认 keep-flow）：
+#   keep-flow      保留 astrbot_plugin_group_context_flow 的注入，关掉内置 group_icl_enable
+#                  —— 落盘持久化（重启不丢）、按 conversation cursor 增量注入、/reset 不回流、
+#                     且有 max_delta_messages 这个可控上限；关掉内置注入**不影响 life 的插话**
+#                     （builtin main.py:145 `group_context_enabled = group_icl_enable or active_reply.enable`）
+#   keep-builtin   保留内置注入，关掉 flow 插件
+#                  —— 少一个第三方插件依赖，但内置那份存在内存里，重启即丢
 #
-# 会同时改 cmd_config.json 和所有 abconf_*.json：实际生效的是会话绑定的配置档，
-# 全局那份改不改都行，一起改省得下次搞混。
+# 两种模式都会顺手做：群历史窗口 700->150 / 1000->200、reply_with_quote 关、分段阈值 400->2000
 set -e
 
 APPLY=0
-[ "$1" = "--apply" ] && APPLY=1
+MODE="keep-flow"
+for arg in "$@"; do
+  case "$arg" in
+    --apply) APPLY=1 ;;
+    keep-flow|keep-builtin) MODE="$arg" ;;
+    *) echo "未知参数: $arg"; exit 1 ;;
+  esac
+done
 
-docker exec -i -e APPLY="$APPLY" astrbot python - <<'PY'
+echo "模式: $MODE   写入: $([ "$APPLY" = "1" ] && echo 是 || echo '否（dry-run）')"
+
+docker exec -i -e APPLY="$APPLY" -e MODE="$MODE" astrbot python - <<'PY'
 import glob, json, os, pathlib, shutil, time
 
 APPLY = os.environ.get("APPLY") == "1"
+MODE = os.environ.get("MODE", "keep-flow")
 STAMP = time.strftime("%Y%m%d_%H%M%S")
 
 TARGETS = ["/AstrBot/data/cmd_config.json"] + [
-    p for p in glob.glob("/AstrBot/data/config/abconf_*.json") if not p.endswith((".bak",))
+    p for p in sorted(glob.glob("/AstrBot/data/config/abconf_*.json")) if not p.endswith((".bak",))
 ]
 TARGETS.append("/AstrBot/data/config/astrbot_plugin_group_context_flow_config.json")
 
@@ -53,18 +64,35 @@ for path in TARGETS:
         print(f"[跳过] {path}: {exc}")
         continue
 
-    before = json.dumps(data, ensure_ascii=False, sort_keys=True)
     touched = []
 
-    # 1) flow 插件：关掉重复注入
+    # 1) 群上下文注入：二选一
     flow = data.get("flow_settings")
-    if isinstance(flow, dict) and flow.get("enabled") is True:
-        flow["enabled"] = False
-        touched.append("flow_settings.enabled: true -> false")
+    if isinstance(flow, dict):
+        want_flow = MODE == "keep-flow"
+        if flow.get("enabled") is not want_flow:
+            touched.append(f"flow_settings.enabled: {flow.get('enabled')} -> {want_flow}")
+            flow["enabled"] = want_flow
+        if want_flow:
+            # 给增量注入加硬上限：0 = 不限量，正是上下文爆炸的来源
+            if flow.get("max_delta_messages") in (0, None):
+                touched.append("flow_settings.max_delta_messages: 0 -> 50")
+                flow["max_delta_messages"] = 50
+            if isinstance(flow.get("max_log_records"), int) and flow["max_log_records"] > 1000:
+                touched.append(
+                    f"flow_settings.max_log_records: {flow['max_log_records']} -> 1000"
+                )
+                flow["max_log_records"] = 1000
 
-    # 2) 内置群上下文窗口
     ltm = data.get("provider_ltm_settings")
     if isinstance(ltm, dict):
+        want_builtin_inject = MODE == "keep-builtin"
+        if ltm.get("group_icl_enable") is not want_builtin_inject:
+            touched.append(
+                f"provider_ltm_settings.group_icl_enable: {ltm.get('group_icl_enable')} -> {want_builtin_inject}"
+            )
+            ltm["group_icl_enable"] = want_builtin_inject
+        # 窗口收敛（不管哪种模式都做；DB 记录本身留着，别的功能要用）
         if ltm.get("group_message_history_max_cnt") not in (None, 150):
             touched.append(
                 f"group_message_history_max_cnt: {ltm['group_message_history_max_cnt']} -> 150"
@@ -74,7 +102,7 @@ for path in TARGETS:
             touched.append(f"group_message_max_cnt: {ltm['group_message_max_cnt']} -> 200")
             ltm["group_message_max_cnt"] = 200
 
-    # 3)+4) 平台回复形态
+    # 2) 回复形态：少拆几条、别引用旧消息
     ps = data.get("platform_settings")
     if isinstance(ps, dict):
         if ps.get("reply_with_quote") is True:
@@ -87,32 +115,23 @@ for path in TARGETS:
             )
             seg["words_count_threshold"] = 2000
 
-    if not touched:
-        continue
-
-    name = pathlib.Path(path).name
-    print(f"\n=== {name} ===")
-    for line in touched:
-        print(f"    {line}")
-
-    after = json.dumps(data, ensure_ascii=False, sort_keys=True)
-    if before == after:
-        continue
-
-    changes.append((path, data))
+    if touched:
+        print(f"\n=== {pathlib.Path(path).name} ===")
+        for line in touched:
+            print(f"    {line}")
+        changes.append((path, data))
 
 if not changes:
-    print("\n没有需要改的（可能已经改过了）")
+    print("\n没有需要改的（可能已经是目标状态）")
+elif APPLY:
+    for path, data in changes:
+        backup = f"{path}.bak_feedback_{STAMP}"
+        shutil.copy2(path, backup)
+        save(path, data)
+        print(f"[已写入] {path}（备份 {pathlib.Path(backup).name}）")
+    print(f"\n共改 {len(changes)} 个文件。")
 else:
-    if APPLY:
-        for path, data in changes:
-            backup = f"{path}.bak_feedback_{STAMP}"
-            shutil.copy2(path, backup)
-            save(path, data)
-            print(f"[已写入] {path}（备份 {pathlib.Path(backup).name}）")
-        print(f"\n共改 {len(changes)} 个文件。")
-    else:
-        print(f"\n[dry-run] 共需改 {len(changes)} 个文件。加 --apply 才会真写（写入前会备份）。")
+    print(f"\n[dry-run] 共需改 {len(changes)} 个文件。加 --apply 才写（写入前自动备份）。")
 PY
 
 if [ "$APPLY" = "1" ]; then

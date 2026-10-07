@@ -33,6 +33,13 @@ from life.core.queue import QueuedMessage  # noqa: E402
 UMO = "aiocqhttp:GroupMessage:100"
 
 
+class _MsgObj:
+    """只为 message_obj.timestamp 存在的假对象。"""
+
+    def __init__(self, timestamp: float = 0.0) -> None:
+        self.timestamp = timestamp
+
+
 class FakeEvent:
     """够用的假事件：只实现 main.py 真正调用的方法。"""
 
@@ -47,6 +54,7 @@ class FakeEvent:
         text: str = "在吗",
         sender_name: str = "某人",
         with_result: bool = True,
+        message_ts: float = 0.0,
     ) -> None:
         self.unified_msg_origin = umo
         self.is_at_or_wake_command = at_or_wake
@@ -55,6 +63,7 @@ class FakeEvent:
         self._private = private
         self.message_str = text
         self._name = sender_name
+        self.message_obj = _MsgObj(message_ts)
         self._stopped = False
         self._result = object() if with_result else None
 
@@ -441,6 +450,34 @@ class TestSafetyWiring(WiringTestBase):
         snapshot = plugin.stats_snapshot()
         self.assertEqual(snapshot["drops"], 1)
         self.assertEqual(snapshot["allows"], 0)
+
+
+class TestStaleAddressedWiring(WiringTestBase):
+    async def test_stale_addressed_is_stopped(self):
+        plugin = self.build(addressed_max_age_seconds=180.0)
+        event = FakeEvent(at_or_wake=True, message_ts=time.time() - 600)
+        await plugin.gate(event)
+        self.assertTrue(event.is_stopped())
+        self.assertTrue(any("stale" in line for line in LOGGER.messages()))
+
+    async def test_fresh_addressed_passes(self):
+        plugin = self.build(addressed_max_age_seconds=180.0)
+        event = FakeEvent(at_or_wake=True, message_ts=time.time() - 5)
+        await plugin.gate(event)
+        self.assertFalse(event.is_stopped())
+
+    async def test_platform_without_timestamp_is_not_punished(self):
+        plugin = self.build(addressed_max_age_seconds=180.0)
+        event = FakeEvent(at_or_wake=True)  # message_ts 默认 0
+        await plugin.gate(event)
+        self.assertFalse(event.is_stopped())
+
+    async def test_millisecond_timestamp_is_normalised(self):
+        plugin = self.build(addressed_max_age_seconds=180.0)
+        event = FakeEvent(at_or_wake=True, message_ts=(time.time() - 5) * 1000)  # 毫秒
+        await plugin.gate(event)
+        self.assertFalse(event.is_stopped())
+
 
 
 if __name__ == "__main__":

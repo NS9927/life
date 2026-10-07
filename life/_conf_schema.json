@@ -50,6 +50,11 @@
     "type": "int",
     "default": 3
   },
+  "addressed_max_age_seconds": {
+    "description": "被 @ / 私聊 的消息如果轮到时已经过去超过这个秒数，就直接不回（0 = 关闭）。防止机器人被长上下文拖住后，把几十分钟前的旧消息翻出来重答",
+    "type": "float",
+    "default": 180.0
+  },
   "addressed_reply": {
     "description": "被 @ / 私聊的回复策略，按活跃度分档",
     "type": "object",

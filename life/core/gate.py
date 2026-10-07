@@ -50,6 +50,7 @@ REASON_LOOP_BREAKER = "loop_breaker"
 REASON_COOLDOWN = "cooldown"
 REASON_PROBABILITY = "probability"
 REASON_CONSECUTIVE_FLOOR = "consecutive_floor"
+REASON_STALE = "stale_addressed"
 
 
 @dataclass(frozen=True)
@@ -61,7 +62,9 @@ class MessageInfo:
     kind: MessageKind
     sender_name: str = ""
     text: str = ""
-    timestamp: float = 0.0  # 0 = 用 Gate 的 clock
+    timestamp: float = 0.0  # 0 = 用 Gate 的 clock（= 我们处理到它的时间）
+    sent_at: float = 0.0
+    """消息在平台上**发出**的时间。0 = 平台没给，不做时效判定。"""
 
 
 @dataclass(frozen=True)
@@ -91,6 +94,8 @@ class GateConfig:
     )
     consecutive_drop_limit: int = 3
     consecutive_drop_scope: str = "sender"  # "sender"（默认，推荐）或 "session"
+    addressed_max_age_seconds: float = 180.0
+    """被点名消息的时效上限（秒）。超过就丢弃不回；0 = 关闭。"""
     silence_list: frozenset[str] = frozenset()
 
     loop_breaker_enable: bool = True
@@ -132,6 +137,9 @@ class GateConfig:
                 if str((raw or {}).get("consecutive_drop_scope", "sender")).strip().lower()
                 == "session"
                 else "sender"
+            ),
+            addressed_max_age_seconds=max(
+                0.0, coerce.as_float((raw or {}).get("addressed_max_age_seconds"), 180.0)
             ),
             silence_list=coerce.as_id_list((raw or {}).get("silence_list")),
             loop_breaker_enable=coerce.as_bool(loop.get("enable"), True),
@@ -249,6 +257,22 @@ class Gate:
         # 1) 静默名单：硬规则，点名叫也不放
         if info.sender_id and info.sender_id in cfg.silence_list:
             return self._drop(info, state, REASON_SILENCE_LIST, 0.0, activity, "发送者在静默名单")
+
+        # 1.5) 时效：被点名的消息拖太久了就直接不回
+        #      真人不会去答一条二十分钟前的 @；那只会让人莫名其妙。
+        #      触发场景：长上下文把管线拖住、或攒批/队列延迟后才轮到这条。
+        if addressed and cfg.addressed_max_age_seconds > 0 and info.sent_at > 0:
+            age = now - info.sent_at
+            if age > cfg.addressed_max_age_seconds:
+                return self._drop(
+                    info,
+                    state,
+                    REASON_STALE,
+                    0.0,
+                    activity,
+                    f"被点名消息已过去 {age / 60:.1f} 分钟"
+                    f"（上限 {cfg.addressed_max_age_seconds / 60:.1f}）",
+                )
 
         # 2) 睡眠时段
         if sleeping:

@@ -263,6 +263,7 @@ class ReplyGate(Star):
             sender_name=event.get_sender_name(),
             text=event.get_message_str(),
             timestamp=time.time(),
+            sent_at=self._message_sent_at(event),
         )
         decision = self._gate.evaluate(info, activity=activity, sleeping=asleep)
 
@@ -412,6 +413,22 @@ class ReplyGate(Star):
                 weekend_sleep_shift_hours=self._weekend_shift,
             ),
         )
+
+    @staticmethod
+    def _message_sent_at(event: AstrMessageEvent) -> float:
+        """消息在平台上**发出**的时间（epoch 秒）。拿不到就返回 0 = 不做时效判定。
+
+        不能用 ``time.time()``：那是「我们才处理到它」的时间。长上下文把管线拖住几分钟后，
+        两者能差十几分钟 —— 群里抱怨的「翻旧消息重答」就是这么来的。
+        """
+        try:
+            raw = getattr(getattr(event, "message_obj", None), "timestamp", 0)
+            value = float(raw or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        if value > 1e11:  # 有些适配器给的是毫秒
+            value /= 1000.0
+        return value
 
     def _warn_once(self, key: str, message: str) -> None:
         if key in self._warned:

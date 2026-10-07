@@ -56,6 +56,7 @@ SETTINGS_KEYS = frozenset(
         "reply_delay",
         "loop_breaker",
         "addressed_reply",
+        "addressed_max_age_seconds",
     }
 )
 

@@ -62,6 +62,7 @@
   textarea{width:100%;min-height:64px;resize:vertical;font-family:inherit;line-height:1.5}
   input:focus,select:focus,textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px var(--acs)}
   input:disabled{opacity:.6;cursor:not-allowed}
+  input.inval{border-color:var(--er)}
   .switch{position:relative;display:inline-flex;align-items:center;cursor:pointer;width:44px;height:24px;flex:0 0 auto}
   .switch input{position:absolute;opacity:0;width:0;height:0}
   .switch .track{
@@ -184,7 +185,8 @@
         { path: 'addressed_reply.enable', type: 'bool', label: '启用分档', def: true, desc: '关掉就永远立刻回。' },
         { path: 'addressed_reply.immediate_threshold', type: 'number', label: '立刻回复的活跃度阈值', def: 0.6, min: 0, max: 1, step: 0.05, desc: '活跃度 ≥ 此值：立刻回。低于此值：攒一个窗口再统一回一次。' },
         { path: 'addressed_reply.batch_window_seconds', type: 'number', label: '攒消息窗口', def: 120, min: 0, max: 3600, step: 1, unit: '秒', desc: '低活跃度时攒多久统一回。窗口内后到的消息并进同一次回复，不额外花 token。' },
-        { path: 'addressed_reply.batch_max_messages', type: 'number', label: '一次最多合并', def: 10, min: 1, max: 100, step: 1, unit: '条', desc: '超出的只保留最新的，旧的标明还有几条没看。' }
+        { path: 'addressed_reply.batch_max_messages', type: 'number', label: '一次最多合并', def: 10, min: 1, max: 100, step: 1, unit: '条', desc: '超出的只保留最新的，旧的标明还有几条没看。' },
+        { path: 'addressed_max_age_seconds', type: 'number', label: '被点名消息时效上限（秒）', def: 180, min: 0, max: 86400, step: 1, unit: '秒', clamp: true, desc: '被 @ / 私聊 的消息如果轮到时已经过去超过这个秒数，就直接不回（0 = 关闭）。防止机器人被长上下文拖住后，把几十分钟前的旧消息翻出来重答。' }
       ]
     },
     {
@@ -296,10 +298,29 @@
     if (f.type === 'bool') return !!el.checked;
     if (f.type === 'number') {
       var n = parseFloat(el.value);
-      return isFinite(n) ? n : null;
+      if (!isFinite(n)) return null;
+      if (f.clamp) {                       // 负数/越界一律钳到边界，绝不把非法值发给后端
+        if (f.min !== undefined) n = Math.max(f.min, n);
+        if (f.max !== undefined) n = Math.min(f.max, n);
+      }
+      return n;
     }
     if (f.type === 'textarea') return textToList(el.value);
     return el.value;
+  }
+
+  // 数值字段的输入体检（只对声明了 clamp 的字段提示，避免其它字段被噪声徽标刷屏）
+  function numberIssue(f) {
+    if (f.type !== 'number' || !f.clamp) return '';
+    var rec = ctrls[f.path];
+    if (!rec) return '';
+    var raw = String(rec.el.value).trim();
+    if (raw === '') return '留空，保存时沿用当前生效值';
+    var n = parseFloat(raw);
+    if (!isFinite(n)) return '不是数字，保存时沿用当前生效值';
+    if (f.min !== undefined && n < f.min) return '小于 ' + f.min + '，保存时将按 ' + f.min + ' 提交';
+    if (f.max !== undefined && n > f.max) return '大于 ' + f.max + '，保存时将按 ' + f.max + ' 提交';
+    return '';
   }
 
   /* ==================== 渲染 ==================== */
@@ -430,6 +451,7 @@
     var serverVal = getPath(server, path);
     var defVal = f.def;
     var curVal = readCtrl(f);
+    if (f.clamp && curVal === null) curVal = numOr(getPath(server, path), f.def);   // 留空/非法时实际会提交当前生效值
 
     var changed = normKey(f, serverVal) !== normKey(f, defVal);
     var unsaved = normKey(f, curVal) !== normKey(f, serverVal);
@@ -438,7 +460,10 @@
     if (changed) html += '<span class="badge">已被你改过</span>';
     else html += '<span class="badge def">与默认一致</span>';
     if (unsaved) html += '<span class="badge warn">未保存的修改：' + esc(fmtValue(f, curVal)) + '</span>';
+    var issue = numberIssue(f);
+    if (issue) html += '<span class="badge warn">' + esc(issue) + '</span>';
     rec.meta.innerHTML = html;
+    if (rec.el.tagName === 'INPUT') rec.el.classList.toggle('inval', !!issue);
   }
 
   function refreshMeta() {

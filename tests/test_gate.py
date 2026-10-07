@@ -365,5 +365,84 @@ class TestDecisionShape(unittest.TestCase):
         self.assertFalse(g2.evaluate(info(), activity=0.5, sleeping=False).allowed)
 
 
+class TestStaleAddressed(unittest.TestCase):
+    """时效：被点名的消息拖太久就直接不回（群里 Funa 提的「超过几分钟就该跳过」）。"""
+
+    NOW = 10000.0
+
+    def _info(self, kind=MessageKind.ADDRESSED, sent_at: float = 0.0):
+        return MessageInfo(
+            umo="aiocqhttp:GroupMessage:100",
+            sender_id="2001",
+            kind=kind,
+            sent_at=sent_at,
+            timestamp=self.NOW,
+        )
+
+    def test_stale_addressed_is_dropped(self):
+        g, rng, _ = make_gate(addressed_max_age_seconds=180.0)
+        decision = g.evaluate(self._info(sent_at=self.NOW - 600), activity=1.0, sleeping=False)
+        self.assertIs(decision.action, Action.DROP)
+        self.assertEqual(decision.reason, gate.REASON_STALE)
+        self.assertIn("10.0 分钟", decision.detail)
+        self.assertEqual(rng.calls, 0)  # 连骰子都不用掷
+
+    def test_fresh_addressed_passes(self):
+        g, _, _ = make_gate(addressed_max_age_seconds=180.0)
+        decision = g.evaluate(self._info(sent_at=self.NOW - 30), activity=1.0, sleeping=False)
+        self.assertIs(decision.action, Action.ALLOW)
+
+    def test_boundary_is_exclusive(self):
+        g, _, _ = make_gate(addressed_max_age_seconds=180.0)
+        self.assertIs(
+            g.evaluate(self._info(sent_at=self.NOW - 180), activity=1.0, sleeping=False).action,
+            Action.ALLOW,
+        )
+        self.assertIs(
+            g.evaluate(self._info(sent_at=self.NOW - 181), activity=1.0, sleeping=False).action,
+            Action.DROP,
+        )
+
+    def test_unknown_sent_at_is_not_punished(self):
+        g, _, _ = make_gate(addressed_max_age_seconds=180.0)
+        decision = g.evaluate(self._info(sent_at=0.0), activity=1.0, sleeping=False)
+        self.assertIs(decision.action, Action.ALLOW)
+
+    def test_zero_disables_the_check(self):
+        g, _, _ = make_gate(addressed_max_age_seconds=0.0)
+        decision = g.evaluate(self._info(sent_at=self.NOW - 99999), activity=1.0, sleeping=False)
+        self.assertIs(decision.action, Action.ALLOW)
+
+    def test_chime_is_not_affected(self):
+        g, _, _ = make_gate(rng_value=0.0, addressed_max_age_seconds=180.0)
+        decision = g.evaluate(
+            self._info(kind=MessageKind.CHIME, sent_at=self.NOW - 99999),
+            activity=1.0,
+            sleeping=False,
+        )
+        self.assertIs(decision.action, Action.ALLOW)
+
+    def test_stale_beats_sleep_queue(self):
+        # 睡眠时段也不该把一条 20 分钟前的消息排进队列，等到早上更荒唐
+        g, _, _ = make_gate(addressed_max_age_seconds=180.0)
+        decision = g.evaluate(self._info(sent_at=self.NOW - 1200), activity=0.0, sleeping=True)
+        self.assertIs(decision.action, Action.DROP)
+        self.assertEqual(decision.reason, gate.REASON_STALE)
+
+    def test_config_parsing(self):
+        self.assertEqual(GateConfig.from_raw({}).addressed_max_age_seconds, 180.0)
+        self.assertEqual(
+            GateConfig.from_raw({"addressed_max_age_seconds": 60}).addressed_max_age_seconds, 60.0
+        )
+        self.assertEqual(
+            GateConfig.from_raw({"addressed_max_age_seconds": "垃圾"}).addressed_max_age_seconds,
+            180.0,
+        )
+        self.assertEqual(
+            GateConfig.from_raw({"addressed_max_age_seconds": -5}).addressed_max_age_seconds, 0.0
+        )
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

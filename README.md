@@ -127,8 +127,10 @@ wsl -d Ubuntu-24.04 -u root -e bash /mnt/c/<你的用户目录>/Projects/life/sc
 
 **已知待办**（按重要性）：
 
-1. **部署到真容器验证**：`scripts/deploy.sh`（会 `docker restart astrbot`），然后看日志里
-   `已读不回` / `放行` 的实际分布，重点确认「被 @ 一定回」。
+1. **真机验证已完成**（2026-10-07）：闸门判定、内置概率改写、按发送者连丢兜底、低活跃度攒批、
+   插件页面全部实测生效；被点名消息还加了时效上限 `addressed_max_age_seconds`（默认 180 秒，过期就丢）。
+   群里反馈的根因分析与待收敛的配置见 `docs/真机反馈与根因分析.md`，
+   一键脚本 `scripts/apply_feedback_config.sh`（默认 dry-run）。
 2. **主动开口（PROACTIVE）没有实现**：它不走事件，需要自研调度器。`gate.py` 已经支持
    `MessageKind.PROACTIVE`，缺的是「什么时候该主动找人说话」的调度 + 话题生成。
 3. **起床补发目前只发文案**（「刚看到…」+ 转述积压消息），没有把消息回炉给 LLM。
