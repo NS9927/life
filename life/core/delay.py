@@ -21,24 +21,25 @@ class DelayConfig:
     """与 _conf_schema.json 的 reply_delay 对应。"""
 
     enable: bool = True
-    min_seconds: float = 1.0
-    max_seconds: float = 4.0
+    min_seconds: float = 0.5
+    max_seconds: float = 1.5
     sleep_extra_seconds: float = 20.0
     activity_penalty: float = 0.0
     """活跃度低时的额外延迟系数：额外 = (1−活跃度) × (max−min) × 本系数。
 
     调参历史（都是真机反馈驱动）：
     - 最初 30 秒 + 系数 1.0 → 活跃度 0.3 时要等 21~50 秒，群里抱怨「延迟又起来了」
-    - 改成 8 秒 + 0.35 → 仍偏慢
-    - 现在 **1~4 秒、系数 0** → 延迟严格落在 min~max 之间，不再随活跃度放大
-      （低活跃度「回得慢」这件事交给攒批窗口去表达，不叠在单条延迟上）
+    - 改成 8 秒 + 0.35 → 仍偏慢；再收到 1~4 秒
+    - 现在 **0.5~1.5 秒、系数 0** —— 实测端到端 = LLM 0.7~4.6 秒 + 本延迟 + 发送 1~2 秒，
+      那 1~4 秒叠上去总量就到 3~10 秒了，所以只留一点点「不是秒回」的手感
+      （低活跃度「回得慢」交给攒批窗口表达，不叠在单条延迟上）
     """
 
     @classmethod
     def from_raw(cls, raw: dict | None) -> DelayConfig:
         raw = coerce.as_mapping(raw)
-        lo = coerce.as_float(raw.get("min_seconds"), 1.0)
-        hi = coerce.as_float(raw.get("max_seconds"), 4.0)
+        lo = coerce.as_float(raw.get("min_seconds"), 0.5)
+        hi = coerce.as_float(raw.get("max_seconds"), 1.5)
         if hi < lo:  # 配置写反了也认，别让延迟变成负数
             lo, hi = hi, lo
         return cls(

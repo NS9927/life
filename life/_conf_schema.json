@@ -181,12 +181,12 @@
       "min_seconds": {
         "description": "最小延迟（秒）",
         "type": "float",
-        "default": 1.0
+        "default": 0.5
       },
       "max_seconds": {
-        "description": "最大延迟（秒）。真机反馈：8 秒在群里偏慢，改成 4",
+        "description": "最大延迟（秒）。真机反馈：LLM 本身就要 1~4.6 秒，再叠 1~4 秒延迟明显慢半拍，收到 1.5",
         "type": "float",
-        "default": 4.0
+        "default": 1.5
       },
       "activity_penalty": {
         "description": "活跃度低时的额外延迟系数：额外 = (1−活跃度) × (max−min) × 本系数。默认 0 = 延迟严格落在 min~max 之间",

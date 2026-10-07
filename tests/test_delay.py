@@ -51,14 +51,15 @@ class TestReplyDelay(unittest.TestCase):
             self.assertAlmostEqual(low, high)
 
     def test_default_config_is_conservative_after_live_tuning(self):
-        # 真机上 21~50 秒的延迟被群里抱怨过，8 秒也偏慢，现在是 1~4 秒
+        # 调参史：50 秒 -> 8 秒 -> 4 秒 -> 现在 0.5~1.5 秒
+        # （端到端 = LLM 0.7~4.6s + 本延迟 + 发送 1~2s，所以这里只留一点手感）
         c = DelayConfig()
-        self.assertEqual(c.min_seconds, 1.0)
-        self.assertEqual(c.max_seconds, 4.0)
+        self.assertEqual(c.min_seconds, 0.5)
+        self.assertEqual(c.max_seconds, 1.5)
         for seed in range(50):
             value = reply_delay_seconds(0.0, config=c, rng=random.Random(seed))
-            self.assertGreaterEqual(value, 1.0)
-            self.assertLessEqual(value, 4.0 + 1e-9)  # 系数 0 -> 不会超出 max
+            self.assertGreaterEqual(value, 0.5)
+            self.assertLessEqual(value, 1.5 + 1e-9)  # 系数 0 -> 不会超出 max
 
     def test_same_seed_is_monotonic_in_activity(self):
         # 活跃度越低延迟越长（同种子对比，排除随机噪声）
@@ -85,8 +86,8 @@ class TestDelayConfig(unittest.TestCase):
     def test_defaults_on_none(self):
         c = DelayConfig.from_raw(None)
         self.assertTrue(c.enable)
-        self.assertEqual(c.min_seconds, 1.0)
-        self.assertEqual(c.max_seconds, 4.0)
+        self.assertEqual(c.min_seconds, 0.5)
+        self.assertEqual(c.max_seconds, 1.5)
         self.assertEqual(c.activity_penalty, 0.0)
 
     def test_reads_dict(self):
@@ -105,8 +106,8 @@ class TestDelayConfig(unittest.TestCase):
 
     def test_broken_values_fall_back(self):
         c = DelayConfig.from_raw({"min_seconds": "马上", "max_seconds": None, "enable": "关"})
-        self.assertEqual(c.min_seconds, 1.0)  # 默认值
-        self.assertEqual(c.max_seconds, 4.0)
+        self.assertEqual(c.min_seconds, 0.5)  # 默认值
+        self.assertEqual(c.max_seconds, 1.5)
         self.assertFalse(c.enable)
 
     def test_bool_from_strings(self):
@@ -117,8 +118,8 @@ class TestDelayConfig(unittest.TestCase):
 
     def test_nan_and_inf_rejected(self):
         c = DelayConfig.from_raw({"min_seconds": "nan", "max_seconds": "inf"})
-        self.assertEqual(c.min_seconds, 1.0)
-        self.assertEqual(c.max_seconds, 4.0)
+        self.assertEqual(c.min_seconds, 0.5)
+        self.assertEqual(c.max_seconds, 1.5)
 
 
 if __name__ == "__main__":
