@@ -108,9 +108,10 @@ for path in TARGETS:
     # 2) 回复形态：少拆几条、别引用旧消息
     ps = data.get("platform_settings")
     if isinstance(ps, dict):
-        if ps.get("reply_with_quote") is True:
-            touched.append("platform_settings.reply_with_quote: true -> false")
-            ps["reply_with_quote"] = False
+        # 注：2026-10-07 曾把 reply_with_quote 关掉，用来压「翻前面的一个个回」的观感。
+        # 但那个观感的两个真因（双份注入、旧消息补答）已经分别用 group_icl_enable=false
+        # 和 addressed_max_age_seconds 治掉了，引用的副作用（群里失去指向线索）反而更明显，
+        # 所以这里**不再动它** —— 保持开启。
         seg = ps.get("segmented_reply")
         if isinstance(seg, dict) and seg.get("words_count_threshold") not in (None, 2000):
             touched.append(

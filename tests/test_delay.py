@@ -12,7 +12,15 @@ from core.delay import DelayConfig, reply_delay_seconds  # noqa: E402
 
 
 def cfg(**kw) -> DelayConfig:
-    base = {"enable": True, "min_seconds": 1.0, "max_seconds": 30.0, "sleep_extra_seconds": 20.0}
+    # 这个 helper 专门用来测「有活跃度惩罚」的行为，所以要显式给 0.35
+    # （DelayConfig 的默认系数现在是 0，延迟严格落在 min~max 之间）
+    base = {
+        "enable": True,
+        "min_seconds": 1.0,
+        "max_seconds": 30.0,
+        "sleep_extra_seconds": 20.0,
+        "activity_penalty": 0.35,
+    }
     base.update(kw)
     return DelayConfig(**base)
 
@@ -43,11 +51,14 @@ class TestReplyDelay(unittest.TestCase):
             self.assertAlmostEqual(low, high)
 
     def test_default_config_is_conservative_after_live_tuning(self):
-        # 真机上 21~50 秒的延迟被群里抱怨了，默认值必须收回来
+        # 真机上 21~50 秒的延迟被群里抱怨过，8 秒也偏慢，现在是 1~4 秒
         c = DelayConfig()
-        worst = reply_delay_seconds(0.0, config=c, rng=random.Random(0))
-        self.assertLessEqual(c.max_seconds, 8.0)
-        self.assertLessEqual(worst, 8.0 + 8.0 * 0.35 + 1e-9)
+        self.assertEqual(c.min_seconds, 1.0)
+        self.assertEqual(c.max_seconds, 4.0)
+        for seed in range(50):
+            value = reply_delay_seconds(0.0, config=c, rng=random.Random(seed))
+            self.assertGreaterEqual(value, 1.0)
+            self.assertLessEqual(value, 4.0 + 1e-9)  # 系数 0 -> 不会超出 max
 
     def test_same_seed_is_monotonic_in_activity(self):
         # 活跃度越低延迟越长（同种子对比，排除随机噪声）
@@ -75,8 +86,8 @@ class TestDelayConfig(unittest.TestCase):
         c = DelayConfig.from_raw(None)
         self.assertTrue(c.enable)
         self.assertEqual(c.min_seconds, 1.0)
-        self.assertEqual(c.max_seconds, 8.0)
-        self.assertEqual(c.activity_penalty, 0.35)
+        self.assertEqual(c.max_seconds, 4.0)
+        self.assertEqual(c.activity_penalty, 0.0)
 
     def test_reads_dict(self):
         c = DelayConfig.from_raw(
@@ -95,7 +106,7 @@ class TestDelayConfig(unittest.TestCase):
     def test_broken_values_fall_back(self):
         c = DelayConfig.from_raw({"min_seconds": "马上", "max_seconds": None, "enable": "关"})
         self.assertEqual(c.min_seconds, 1.0)  # 默认值
-        self.assertEqual(c.max_seconds, 8.0)
+        self.assertEqual(c.max_seconds, 4.0)
         self.assertFalse(c.enable)
 
     def test_bool_from_strings(self):
@@ -107,7 +118,7 @@ class TestDelayConfig(unittest.TestCase):
     def test_nan_and_inf_rejected(self):
         c = DelayConfig.from_raw({"min_seconds": "nan", "max_seconds": "inf"})
         self.assertEqual(c.min_seconds, 1.0)
-        self.assertEqual(c.max_seconds, 8.0)
+        self.assertEqual(c.max_seconds, 4.0)
 
 
 if __name__ == "__main__":
