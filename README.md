@@ -36,7 +36,8 @@ life/
 ├── .gitattributes                   统一 LF（否则 deploy.sh 在 WSL 里报 \r 错）
 ├── docs/
 │   ├── 可行性报告与设计.md          ★ 主文档，含源码级证据与机制修正
-│   └── 灵犀fork-审计报告.md         相关参考（第三方插件审计）
+│   ├── 灵犀fork-审计报告.md         相关参考（第三方插件审计）
+│   └── 真机反馈与根因分析.md        ★ 上线后群里的真实反馈 + 逐层根因 + 该改哪个字段
 ├── life/       插件本体（可整包拷进 data/plugins/）
 │   ├── metadata.yaml
 │   ├── _conf_schema.json            配置面板（含 session_cooldown）

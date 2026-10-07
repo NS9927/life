@@ -11,12 +11,12 @@
     --tx:#e9e9ef; --tx2:#a3a3b2; --tx3:#747482;
     --ac:#4c8dff; --ac2:#3b74d8; --acs:rgba(76,141,255,.16);
     --ok:#3ecf8e; --wn:#ffb020; --er:#ff6060;
-    --grid:#2f2f3a; --step:#9a9aff;
+    --grid:#2f2f3a; --main:#9a9aff;
   }
   html[data-theme="light"]{
     --bg:#f5f5f7; --card:#ffffff; --card2:#f0f0f4; --bd:#e3e3ea; --bd2:#d5d5df;
     --tx:#1c1c22; --tx2:#5b5b68; --tx3:#8d8d99;
-    --acs:rgba(76,141,255,.13); --grid:#e7e7ee; --step:#5b5bd6;
+    --acs:rgba(76,141,255,.13); --grid:#e7e7ee; --main:#5b5bd6;
   }
   [hidden]{display:none !important}
   html,body{height:100%}
@@ -73,7 +73,7 @@
   .legend{display:flex;flex-wrap:wrap;gap:16px;margin:16px 0 4px;font-size:12px;color:var(--tx2)}
   .lg{display:inline-flex;align-items:center;gap:7px}
   .sw{display:inline-block;width:16px;height:0;border-top-width:3px;border-top-style:solid;border-radius:2px}
-  .sw.step{border-color:var(--step)}
+  .sw.main{border-color:var(--main)}
   .sw.prev{border-color:var(--ac);opacity:.65;border-top-style:dashed}
   .sw.now{border-color:var(--wn);border-top-style:dashed;border-top-width:2px}
   .chartwrap{position:relative;margin-top:8px;width:100%}
@@ -81,7 +81,7 @@
   .grid{stroke:var(--grid);stroke-width:1}
   .gridv{stroke:var(--grid);stroke-width:1;stroke-dasharray:2 4;opacity:.75}
   .ax{fill:var(--tx3);font-size:11px;font-family:inherit}
-  .step{fill:none;stroke:var(--step);stroke-width:2;stroke-linejoin:round}
+  .mainline{fill:none;stroke:var(--main);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
   .prev{fill:none;stroke:var(--ac);stroke-width:2.5;opacity:.62;stroke-linejoin:round}
   .nowline{stroke:var(--wn);stroke-width:1.5;stroke-dasharray:4 3;opacity:.9}
   .nowtext{fill:var(--wn);font-size:11px;text-anchor:middle;font-family:inherit}
@@ -150,7 +150,7 @@
     </div>
 
     <div class="legend">
-      <span class="lg"><i class="sw step"></i>你设的 48 档（每半小时一档，阶梯）</span>
+      <span class="lg"><i class="sw main"></i>你设的 48 档（每半小时一档，折线）</span>
       <span class="lg"><i class="sw prev"></i>插值后机器人实际使用的曲线（后端计算）</span>
       <span class="lg"><i class="sw now"></i>当前时刻</span>
     </div>
@@ -161,7 +161,7 @@
     </div>
 
     <p class="hint">
-      拖动圆点改权重（0–100，只能上下）。默认<b>带动右侧所有点一起平移</b>，按住 <kbd>Shift</kbd> 只改当前点。
+      拖动圆点改权重（0–100，只能上下）。默认<b>只改当前这一个点</b>；按住 <kbd>Shift</kbd> 拖动则<b>带动该点及其右侧所有点一起平移</b>（同一 delta，夹在 0–100）。
       键盘：<kbd>↑</kbd>/<kbd>↓</kbd> ±1，<kbd>Shift</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd> ±10，<kbd>PgUp</kbd>/<kbd>PgDn</kbd> ±25。
       <b>双击</b>该点置 0（睡眠），再双击恢复原值。
     </p>
@@ -321,7 +321,7 @@
 
   /* ==================== 图表 ==================== */
   var W = 960, plotW = W - PL - PR, plotH = H - PT - PB;
-  var stepPath = null, prevPath = null, nowLine = null, nowText = null;
+  var mainPath = null, prevPath = null, nowLine = null, nowText = null;
   var dotEls = [], hitEls = [];
 
   function xAt(t) { return PL + (t / 24) * plotW; }
@@ -362,13 +362,13 @@
     svg.innerHTML =
       '<g class="gGrid">' + g + '</g>'
       + '<g class="gPrev"><path class="prev" d=""/></g>'
-      + '<g class="gStep"><path class="step" d=""/></g>'
+      + '<g class="gMain"><path class="mainline" d=""/></g>'
       + '<g class="gNow"><line class="nowline" x1="-99" y1="' + PT + '" x2="-99" y2="' + (PT + plotH) + '"/>'
       + '<text class="nowtext" x="-99" y="' + (PT - 6) + '"></text></g>'
       + '<g class="gPts">' + pts + '</g>'
       + '<g class="gAxis">' + xl + '</g>';
 
-    stepPath = svg.querySelector('.step');
+    mainPath = svg.querySelector('.mainline');
     prevPath = svg.querySelector('.prev');
     nowLine = svg.querySelector('.nowline');
     nowText = svg.querySelector('.nowtext');
@@ -387,13 +387,15 @@
     });
   }
 
-  function stepD() {
+  // 主曲线：普通折线，依次穿过 48 个节点圆心（相邻两点之间是直线段，不是阶梯）。
+  // 首尾各补一个边界顶点：00:00 用第 1 个桶的权重，24:00 用最后一个桶的权重，让线铺满一整天。
+  function mainD() {
     var w = state.weights;
     var d = 'M ' + r2(xAt(0)) + ' ' + r2(yAt(w[0]));
-    for (var i = 1; i < N; i++) {
-      d += ' H ' + r2(xAt(i * 0.5)) + ' V ' + r2(yAt(w[i]));
+    for (var i = 0; i < N; i++) {
+      d += ' L ' + r2(xAt(i * 0.5 + 0.25)) + ' ' + r2(yAt(w[i]));
     }
-    d += ' H ' + r2(xAt(24));
+    d += ' L ' + r2(xAt(24)) + ' ' + r2(yAt(w[N - 1]));
     return d;
   }
   function seriesD(series) {
@@ -407,8 +409,8 @@
   }
 
   function updateChart() {
-    if (!stepPath) return;
-    stepPath.setAttribute('d', stepD());
+    if (!mainPath) return;
+    mainPath.setAttribute('d', mainD());
     for (var i = 0; i < N; i++) {
       var cy = r2(yAt(state.weights[i]));
       dotEls[i].setAttribute('cy', cy);
@@ -473,9 +475,7 @@
     if (!d) return;
     var v = valueFromEvent(e);
     if (e.shiftKey) {
-      state.weights[d.i] = v;
-      delete state.zeroed[d.i];
-    } else {
+      // Shift：带动该点及其右侧所有点一起平移（同一 delta，夹在 0~100）
       var delta = v - d.startV;
       for (var k = d.i; k < N; k++) {
         var nv = clamp100(d.base[k] + delta);
@@ -484,6 +484,10 @@
           delete state.zeroed[k];
         }
       }
+    } else {
+      // 默认：只改当前这一个点，其余 47 个不动
+      state.weights[d.i] = v;
+      delete state.zeroed[d.i];
     }
     d.moved = true;
     updateChart();
