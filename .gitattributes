@@ -1,0 +1,6 @@
+# 统一按 LF 存盘：插件要部署到 WSL/Linux，
+# 若 deploy.sh 变成 CRLF，bash 会报 `$'\r': command not found`。
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf

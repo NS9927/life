@@ -1,0 +1,141 @@
+{
+  "enable": {
+    "description": "总开关",
+    "type": "bool",
+    "default": true
+  },
+  "time_weights": {
+    "description": "时段权重表。每行格式：起始小时-结束小时=权重（0-100）。24 小时制。",
+    "type": "text",
+    "default": "0-2=80\n2-8=0\n8-10=10\n10-12=30\n12-14=40\n14-19=30\n19-23=80\n23-24=60"
+  },
+  "interpolate_minutes": {
+    "description": "时段切换的平滑插值半径（分钟）。0 = 硬切换（不推荐，突变也是机器特征）",
+    "type": "int",
+    "default": 45
+  },
+  "weekend_multiplier": {
+    "description": "周末权重系数",
+    "type": "float",
+    "default": 1.3
+  },
+  "weekend_sleep_shift_hours": {
+    "description": "周末睡眠时段后移小时数（比如工作日 2 点睡、周末 3 点睡）",
+    "type": "int",
+    "default": 1
+  },
+  "base_probability": {
+    "description": "基础概率（会被时段权重相乘）",
+    "type": "object",
+    "items": {
+      "chime": {
+        "description": "群聊插话（没 @ 它）",
+        "type": "float",
+        "default": 0.1
+      },
+      "proactive": {
+        "description": "主动开口（没人问它）",
+        "type": "float",
+        "default": 0.3
+      },
+      "addressed": {
+        "description": "被 @ / 被私聊。注意：这一档不参与乘法，仅用于延迟；睡眠时段走排队",
+        "type": "float",
+        "default": 1.0
+      }
+    }
+  },
+  "consecutive_drop_limit": {
+    "description": "同一会话最多连续丢弃几条。防止连发多条时出现「一条都不回」",
+    "type": "int",
+    "default": 2
+  },
+  "silence_list": {
+    "description": "静默名单（QQ 号）。名单内发送者的消息直接已读不回，不进 LLM",
+    "type": "list",
+    "default": []
+  },
+  "loop_breaker": {
+    "description": "循环熔断：检测两个 ID 交替发言，连续 N 轮后静默 X 分钟",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用循环熔断",
+        "type": "bool",
+        "default": true
+      },
+      "alternate_rounds": {
+        "description": "判定为循环的交替轮数",
+        "type": "int",
+        "default": 4
+      },
+      "silence_minutes": {
+        "description": "熔断后静默时长（分钟）",
+        "type": "int",
+        "default": 30
+      },
+      "exempt_addressed": {
+        "description": "被 @ / 私聊时豁免熔断（避免真人在 @ 时变哑巴）",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "sleep_queue": {
+    "description": "睡眠时段的消息排队，起床后补发",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用排队补发",
+        "type": "bool",
+        "default": true
+      },
+      "flush_at_hour": {
+        "description": "起床补发的整点小时",
+        "type": "int",
+        "default": 8
+      },
+      "only_addressed": {
+        "description": "只对「被点名 / 私聊」的消息补发（群聊闲聊直接丢）",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "reply_delay": {
+    "description": "回复延迟（替代 0.5 秒秒回）",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用回复延迟",
+        "type": "bool",
+        "default": true
+      },
+      "min_seconds": {
+        "description": "最小延迟（秒）",
+        "type": "float",
+        "default": 1.0
+      },
+      "max_seconds": {
+        "description": "最大延迟（秒）",
+        "type": "float",
+        "default": 30.0
+      },
+      "sleep_extra_seconds": {
+        "description": "睡眠时段的额外延迟（秒）",
+        "type": "float",
+        "default": 20.0
+      }
+    }
+  },
+  "session_whitelist": {
+    "description": "只对这些会话生效（unified_msg_origin）。留空 = 全部",
+    "type": "list",
+    "default": []
+  },
+  "verbose_log": {
+    "description": "每次「已读不回」都打日志（排障必开）",
+    "type": "bool",
+    "default": true
+  }
+}
