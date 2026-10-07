@@ -31,6 +31,17 @@ gate 的 ``MessageKind.PROACTIVE`` 档位仍然服务「有事件可依附」的
 ⚠️ ``probability["blocked"]`` 默认 0.0，于是 blocked 档等价于**硬闸门**
 （拒绝原因走 ``blocked_slot``）。把这一项调大于 0 才会让「可打扰度=blocked」的
 时段重新参与掷骰子——两个旋钮都活着，不写死。
+
+★ **白名单是唯一决定「哪些会话可能被主动开口」的开关**
+（``ProactiveConfig.session_list``）：
+
+- 默认**空 = 永不出手**；``enable=false`` 与「白名单为空」完全等价
+  （两者都是关闭：不解析时间线、不起循环、不调 provider，零副作用）。
+- 条目支持两种写法：**完整 umo 精确匹配**（``aiocqhttp:GroupMessage:123456``），
+  或**直接填群号 / QQ 号**（裸 id，按 umo 最后一段匹配）——见 ``match_session``。
+- 平台上**枚举不出会话**，所以裸 id 只有在我们**见过该会话的消息**之后才会被纳入
+  候选（见 ``candidate_sessions`` 与 main.py 的 ``_proactive_seen``）；
+  完整 umo 本身就是会话标识，不需要先收到消息。
 """
 from __future__ import annotations
 
@@ -279,6 +290,79 @@ def next_speakable_start(now: datetime, timeline: Any) -> datetime | None:
 
 
 # ----------------------------------------------------------------------
+# 白名单匹配（群聊 / 私聊都填得）
+# ----------------------------------------------------------------------
+def _norm_session(value: Any) -> str:
+    """会话标识归一化：转字符串、去前后空白、大小写折叠（umo 的平台名大小写可能不一）。"""
+    return str(value if value is not None else "").strip().casefold()
+
+
+def _last_segment(text: str) -> str:
+    """umo 的最后一段（``aiocqhttp:GroupMessage:123456`` → ``123456``）。"""
+    return text.rsplit(":", 1)[-1]
+
+
+def match_session(umo: str, session_list: Any) -> bool:
+    """这个会话在不在主动开口白名单里。
+
+    两种条目写法（**先精确 umo，再退化为「最后一段相等」**）：
+
+    1. **完整 umo**：``aiocqhttp:GroupMessage:123456`` → 与 umo 精确相等才命中
+       （大小写不敏感、前后空白忽略）。填了完整 umo 就说明用户指的就是这个会话，
+       所以**不再**退化成「最后一段」——否则
+       ``...:GroupMessage:123`` 会意外命中 ``...:FriendMessage:123``。
+    2. **裸 id**：``123456`` → 只要 umo 的最后一段等于它就算命中。
+       群号、QQ 号都能直接填，不用拼前缀；同一个裸 id 出现在多个会话（比如
+       某个群的群号和某个人的 QQ 号恰好相同）时**每个都会命中**。
+
+    边界：``session_list`` 为空 / 缺键 / 全是空条 → ``False``（保守：不生效）；
+    条目里的非数字垃圾既不会命中任何东西，也不会抛异常。
+    """
+    target = _norm_session(umo)
+    if not target:
+        return False
+    entries = session_list if session_list else ()
+    if not entries:
+        return False
+
+    last = _last_segment(target)
+    for raw in entries:
+        item = _norm_session(raw)
+        if not item:
+            continue
+        if item == target:  # 完整 umo 精确命中（优先级最高）
+            return True
+        if ":" not in item and last and item == last:  # 裸 id：最后一段相等
+            return True
+    return False
+
+
+def candidate_sessions(session_list: Any, seen_sessions: Any = None) -> list[str]:
+    """主动检查要遍历的**真实会话**列表（去重、排序）。
+
+    为什么不能直接遍历白名单条目：裸 id 不是会话标识，
+    ``context.send_message("123456", ...)`` 根本发不出去。所以候选来自两处：
+
+    - 白名单里**含 ``:`` 的条目**：它本身就是完整 umo，可以直接当会话用
+      （不需要先收到消息，保持原有能力）；
+    - ``seen_sessions`` 里**匹配白名单**的会话：平台枚举不出会话，
+      裸 id 只能靠「见过该会话的消息」来发现（main.py 在收到消息时记录）。
+
+    返回前统一再过一遍 ``match_session``，保证调用方拿到的每个会话都真的在名单里。
+    """
+    out: set[str] = set()
+    for raw in session_list or ():
+        item = str(raw if raw is not None else "").strip()
+        if item and ":" in item:
+            out.add(item)
+    for raw in seen_sessions or ():
+        item = str(raw if raw is not None else "").strip()
+        if item and match_session(item, session_list):
+            out.add(item)
+    return sorted(umo for umo in out if match_session(umo, session_list))
+
+
+# ----------------------------------------------------------------------
 # 配置
 # ----------------------------------------------------------------------
 @dataclass(frozen=True)
@@ -290,6 +374,10 @@ class ProactiveConfig:
 
     enable: bool = False
     session_list: frozenset[str] = frozenset()
+    """群聊 / 私聊白名单。**唯一决定哪些会话可能被主动开口**，空 = 不生效。
+
+    条目两种写法：完整 umo（精确匹配）或裸群号 / QQ 号（按 umo 最后一段匹配），
+    见 ``match_session``；候选会话见 ``candidate_sessions``。"""
     timeline: str = DEFAULT_TIMELINE
     probability: Mapping[str, float] = field(
         default_factory=lambda: dict(DEFAULT_PROBABILITY)
@@ -478,7 +566,7 @@ def should_speak(
         return _reject(
             REASON_EMPTY_LIST, "", 0.0, activity, "proactive.session_list 为空（保守：不生效）"
         )
-    if not state.umo or state.umo not in config.session_list:
+    if not state.umo or not match_session(state.umo, config.session_list):
         return _reject(
             REASON_NOT_IN_LIST, "", 0.0, activity, f"{state.umo or '(未命名会话)'} 不在 session_list"
         )

@@ -199,6 +199,10 @@ class ReplyGate(Star):
         self._proactive_cfg = proactive.ProactiveConfig()
         self._proactive_slots: tuple[proactive.TimelineSlot, ...] = ()
         self._proactive_states: dict[str, proactive.DailyState] = {}
+        self._proactive_seen: set[str] = set()
+        """见过的、且命中主动白名单的会话（umo）。
+        平台枚举不出会话，所以裸群号 / QQ 号白名单条目只能靠「收到过该会话的消息」来发现
+        （见 core/proactive.candidate_sessions）；完整 umo 条目不需要这个。"""
         self._proactive_task: asyncio.Task | None = None
         self._proactive_retired: list[asyncio.Task] = []
         self._recent: dict[str, deque[str]] = {}
@@ -570,7 +574,7 @@ class ReplyGate(Star):
         # 作息表主权：睡着就绝不主动（判定链里也会再确认一次）
         asleep = schedule.sleeping(now, self._segments, weekend_sleep_shift_hours=self._weekend_shift)
 
-        for umo in sorted(cfg.session_list):
+        for umo in proactive.candidate_sessions(cfg.session_list, self._proactive_seen):
             try:
                 await self._proactive_for_session(umo, now, activity, asleep)
             except Exception:
@@ -762,9 +766,14 @@ class ReplyGate(Star):
         if classify.is_self_message(sender_id, event.get_self_id()):
             return
 
-        # 主动开口要「参考最近的聊天」：只在启用时记录（关闭时零副作用）。
+        # 主动开口：只在启用时记录（关闭时零副作用）。
+        # - _proactive_seen：裸群号 / QQ 号白名单条目要靠它才找得到真实会话
+        # - _note_recent：主动开口「参考最近的聊天」
         # 放在闸门判定之前：被已读不回的消息同样是「最近聊过什么」的一部分。
-        if self._proactive_cfg.active:
+        if self._proactive_cfg.active and proactive.match_session(
+            umo, self._proactive_cfg.session_list
+        ):
+            self._proactive_seen.add(umo)
             self._note_recent(umo, event.get_message_str())
 
         kind = classify.classify(

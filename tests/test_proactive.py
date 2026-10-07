@@ -182,6 +182,96 @@ class TestAvailabilityAt(unittest.TestCase):
         self.assertEqual(proactive.availability_at(datetime(2026, 10, 7, 10, 0), slots), proactive.HIGH)
 
 
+GROUP_UMO = "aiocqhttp:GroupMessage:123456"
+FRIEND_UMO = "aiocqhttp:FriendMessage:123456"
+
+
+class TestMatchSession(unittest.TestCase):
+    """白名单：完整 umo 精确匹配；裸 id 退化为「最后一段相等」（群聊 / 私聊都填得）。"""
+
+    def test_full_umo_exact_hit(self):
+        self.assertTrue(proactive.match_session(GROUP_UMO, [GROUP_UMO]))
+
+    def test_bare_group_id_hits_group_chat(self):
+        self.assertTrue(proactive.match_session(GROUP_UMO, ["123456"]))
+
+    def test_bare_qq_id_hits_private_chat(self):
+        self.assertTrue(proactive.match_session(FRIEND_UMO, ["123456"]))
+
+    def test_same_bare_id_hits_every_session_with_that_tail(self):
+        # 同一个裸 id 出现在两个会话时都要命中，不能只取一个
+        entries = ["123456"]
+        hits = [umo for umo in (GROUP_UMO, FRIEND_UMO) if proactive.match_session(umo, entries)]
+        self.assertEqual(hits, [GROUP_UMO, FRIEND_UMO])
+
+    def test_empty_list_never_matches(self):
+        for empty in ([], (), set(), frozenset(), None, ""):
+            self.assertFalse(proactive.match_session(GROUP_UMO, empty), msg=repr(empty))
+
+    def test_case_insensitive(self):
+        self.assertTrue(proactive.match_session("aiocqhttp:GroupMessage:123456",
+                                                ["AIOCQHTTP:GROUPMESSAGE:123456"]))
+        self.assertTrue(proactive.match_session("AIOCQHTTP:GroupMessage:123456",
+                                                ["aiocqhttp:groupmessage:123456"]))
+
+    def test_whitespace_and_int_entries(self):
+        self.assertTrue(proactive.match_session(GROUP_UMO, ["  123456  "]))
+        self.assertTrue(proactive.match_session(GROUP_UMO, [123456]))
+        self.assertTrue(proactive.match_session("  aiocqhttp:GroupMessage:123456  ", [GROUP_UMO]))
+
+    def test_garbage_entries_never_match_and_never_raise(self):
+        garbage = ["", "   ", "这不是群号", "abc", None, ":", "aiocqhttp:GroupMessage:", 3.14]
+        for umo in (GROUP_UMO, FRIEND_UMO, "", None, "没有冒号的会话名"):
+            self.assertFalse(
+                proactive.match_session(umo, garbage), msg=f"umo={umo!r}"
+            )
+
+    def test_full_umo_entry_does_not_leak_to_other_session_kind(self):
+        """填了完整 umo 就是指定了那个会话：不再退化成「最后一段」，
+        否则 ...:GroupMessage:123456 会意外命中同一个号码的私聊。"""
+        self.assertFalse(proactive.match_session(FRIEND_UMO, [GROUP_UMO]))
+
+    def test_empty_umo_never_matches(self):
+        self.assertFalse(proactive.match_session("", ["123456"]))
+        self.assertFalse(proactive.match_session(None, ["123456"]))
+
+    def test_mixed_entries(self):
+        entries = [GROUP_UMO, "999"]
+        self.assertTrue(proactive.match_session(GROUP_UMO, entries))
+        self.assertTrue(proactive.match_session("aiocqhttp:FriendMessage:999", entries))
+        self.assertFalse(proactive.match_session("aiocqhttp:FriendMessage:123456", entries))
+
+
+class TestCandidateSessions(unittest.TestCase):
+    """候选会话：含 ``:`` 的白名单条目本身就是会话；裸 id 要靠「见过该会话」来发现。"""
+
+    def test_full_umo_entries_are_candidates_without_seen(self):
+        self.assertEqual(proactive.candidate_sessions([GROUP_UMO], set()), [GROUP_UMO])
+
+    def test_bare_id_needs_seen_session(self):
+        self.assertEqual(proactive.candidate_sessions(["123456"], set()), [])
+        self.assertEqual(
+            proactive.candidate_sessions(["123456"], {GROUP_UMO, FRIEND_UMO}),
+            [FRIEND_UMO, GROUP_UMO],  # 字典序
+        )
+
+    def test_unrelated_seen_sessions_are_filtered_out(self):
+        self.assertEqual(
+            proactive.candidate_sessions(["123456"], {"aiocqhttp:GroupMessage:999"}), []
+        )
+
+    def test_sorted_and_deduped(self):
+        seen = {GROUP_UMO, FRIEND_UMO, "aiocqhttp:GroupMessage:999"}
+        self.assertEqual(
+            proactive.candidate_sessions(["123456", "123456", GROUP_UMO], seen),
+            [FRIEND_UMO, GROUP_UMO],
+        )
+
+    def test_empty_whitelist_yields_nothing(self):
+        self.assertEqual(proactive.candidate_sessions([], {GROUP_UMO}), [])
+        self.assertEqual(proactive.candidate_sessions(None, {GROUP_UMO}), [])
+
+
 # ======================================================================
 # 2. should_speak：每条拒绝原因
 # ======================================================================
@@ -218,6 +308,18 @@ class TestShouldSpeakReasons(unittest.TestCase):
         )
         self.assertFalse(decision.allow)
         self.assertEqual(decision.reason, proactive.REASON_NOT_IN_LIST)
+
+    def test_bare_group_id_in_whitelist_allows_group_session(self):
+        decision = self.decide(
+            st=state(umo=GROUP_UMO), config=cfg(session_list={"123456"}), timeline=DEFAULT_SLOTS
+        )
+        self.assertTrue(decision.allow)
+
+    def test_bare_qq_id_in_whitelist_allows_private_session(self):
+        decision = self.decide(
+            st=state(umo=FRIEND_UMO), config=cfg(session_list={"123456"}), timeline=DEFAULT_SLOTS
+        )
+        self.assertTrue(decision.allow)
 
     def test_unnamed_session_is_not_whitelisted(self):
         decision = self.decide(st=proactive.DailyState())
@@ -782,6 +884,60 @@ class TestWiringZeroSideEffects(WiringTestBase):
         await plugin._maybe_proactive_check()  # 不该抛
 
 
+class TestWiringSessionList(WiringTestBase):
+    """白名单的两种写法在接线层的行为（群聊 / 私聊都能填）。"""
+
+    async def test_full_umo_entry_works_without_any_message(self):
+        plugin = self.build(
+            FakeProvider(), proactive=proactive_conf(session_list=[GROUP_UMO])
+        )
+        await plugin._maybe_proactive_check()
+        self.assertEqual([umo for umo, _ in self.ctx.sent], [GROUP_UMO])
+
+    async def test_bare_group_id_only_after_seeing_that_session(self):
+        plugin = self.build(FakeProvider(), proactive=proactive_conf(session_list=["123456"]))
+
+        # 没收到过任何消息 → 枚举不出会话，什么都不发（裸 id 的代价）
+        await plugin._maybe_proactive_check()
+        self.assertEqual(self.ctx.sent, [])
+        self.assertEqual(self.ctx.provider_calls, 0)
+
+        # 收到一条群消息 → 记录该会话 → 下一次检查就能主动开口，
+        # 而且必须发到**真实 umo**上，绝不能发到 "123456"
+        await plugin.gate(FakeEvent(umo=GROUP_UMO))
+        self.assertEqual(plugin._proactive_seen, {GROUP_UMO})
+        await plugin._maybe_proactive_check()
+        self.assertEqual([umo for umo, _ in self.ctx.sent], [GROUP_UMO])
+
+    async def test_bare_qq_id_works_for_private_chat(self):
+        plugin = self.build(FakeProvider(), proactive=proactive_conf(session_list=["123456"]))
+        await plugin.gate(FakeEvent(umo=FRIEND_UMO))
+        await plugin._maybe_proactive_check()
+        self.assertEqual([umo for umo, _ in self.ctx.sent], [FRIEND_UMO])
+
+    async def test_same_bare_id_in_two_sessions_both_get_messages(self):
+        plugin = self.build(FakeProvider(), proactive=proactive_conf(session_list=["123456"]))
+        await plugin.gate(FakeEvent(umo=GROUP_UMO))
+        await plugin.gate(FakeEvent(umo=FRIEND_UMO))
+        await plugin._maybe_proactive_check()
+        self.assertEqual([umo for umo, _ in self.ctx.sent], sorted([GROUP_UMO, FRIEND_UMO]))
+
+    async def test_non_matching_session_is_not_recorded(self):
+        plugin = self.build(FakeProvider(), proactive=proactive_conf(session_list=["999"]))
+        await plugin.gate(FakeEvent(umo=GROUP_UMO))
+        self.assertEqual(plugin._proactive_seen, set())
+        await plugin._maybe_proactive_check()
+        self.assertEqual(self.ctx.sent, [])
+
+    async def test_disabled_plugin_does_not_record_sessions(self):
+        plugin = self.build(
+            FakeProvider(), proactive=proactive_conf(enable=False, session_list=["123456"])
+        )
+        await plugin.gate(FakeEvent(umo=GROUP_UMO))
+        self.assertEqual(plugin._proactive_seen, set())
+        self.assertEqual(plugin._recent, {})
+
+
 class TestWiringHappyPath(WiringTestBase):
     async def test_allowed_check_generates_and_sends(self):
         provider = FakeProvider("在忙吗？")
@@ -1069,6 +1225,11 @@ class TestStatsAndSchema(WiringTestBase):
         self.assertEqual(items["daily_budget"]["default"], 3)
         for level in proactive.LEVELS:
             self.assertIn(level, items["probability"]["items"])
+        # 白名单要写成「群聊 / 私聊都能填」，并且默认关闭是两道保险
+        self.assertIn("群号", items["session_list"]["description"])
+        self.assertIn("QQ", items["session_list"]["description"])
+        self.assertIn("留空", items["session_list"]["description"])
+        self.assertIn("两道保险", items["enable"]["description"])
 
     def test_webapi_settings_whitelist_contains_proactive(self):
         self.assertIn("proactive", webapi.SETTINGS_KEYS)

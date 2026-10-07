@@ -160,7 +160,7 @@
         { path: 'enable', type: 'bool', label: '总开关', def: true, desc: '关掉后插件完全不介入，消息全部原样放行。' },
         { path: 'verbose_log', type: 'bool', label: '每次「已读不回」打日志', def: true, desc: '排障必开：日志里会写明消息是被哪一层丢掉的。' },
         { path: 'base_probability.chime', type: 'number', label: '群聊插话基础概率', def: 0.03, min: 0, max: 1, step: 0.01, desc: '没 @ 它时的开口概率。真机实测 0.1 在活跃群里太吵。' },
-        { path: 'base_probability.proactive', type: 'number', label: '主动开口基础概率', def: 0.3, min: 0, max: 1, step: 0.01, desc: '没人问它、它自己想说话时用这一档。' },
+        { path: 'base_probability.proactive', type: 'number', label: '主动开口基础概率（闸门档，当前备用）', def: 0.3, min: 0, max: 1, step: 0.01, desc: '没人问它、它自己想说话时用这一档。主动开口目前走下面「主动开口」组的可打扰度概率表，这里的基础概率暂不参与；保留是为了闸门语义完整。' },
         { path: 'base_probability.addressed', type: 'number', label: '被 @ / 私聊基础概率', def: 1.0, min: 0, max: 1, step: 0.01, locked: true, desc: '恒为 1.0，不参与乘法，只用于延迟计算；睡眠时段走排队补发。' },
         { path: 'consecutive_drop_limit', type: 'number', label: '同一发送者最多连续被丢', def: 3, min: 0, max: 99, step: 1, unit: '条', desc: '防止「连发三条一条都不回」。0 = 关闭该保护。' },
         { path: 'consecutive_drop_scope', type: 'select', label: '连丢计数范围', def: 'sender', options: [['sender', '按发送者（推荐）'], ['session', '按会话（整群共用）']], desc: '按发送者：群里很多人各说一句不会误触发；按会话：容易让机器人变吵。' }
@@ -187,6 +187,28 @@
         { path: 'addressed_reply.batch_window_seconds', type: 'number', label: '攒消息窗口', def: 120, min: 0, max: 3600, step: 1, unit: '秒', desc: '低活跃度时攒多久统一回。窗口内后到的消息并进同一次回复，不额外花 token。' },
         { path: 'addressed_reply.batch_max_messages', type: 'number', label: '一次最多合并', def: 10, min: 1, max: 100, step: 1, unit: '条', desc: '超出的只保留最新的，旧的标明还有几条没看。' },
         { path: 'addressed_max_age_seconds', type: 'number', label: '被点名消息时效上限（秒）', def: 180, min: 0, max: 86400, step: 1, unit: '秒', clamp: true, desc: '被 @ / 私聊 的消息如果轮到时已经过去超过这个秒数，就直接不回（0 = 关闭）。防止机器人被长上下文拖住后，把几十分钟前的旧消息翻出来重答。' }
+      ]
+    },
+    {
+      title: '主动开口',
+      desc: '机器人自己找话题说话。默认关闭；填了白名单才会生效，且睡眠时段绝不开口（作息表说了算）。',
+      fields: [
+        { path: 'proactive.enable', type: 'bool', label: '启用主动开口', def: false, desc: '★默认关闭：还要在下面填白名单才会真正生效。关着的时候其它项照样可以先配好，打开即生效。' },
+        { path: 'proactive.session_list', type: 'textarea', label: '主动开口白名单（umo / 群号 / QQ 号）', def: [], rows: 4, placeholder: '一行一个会话，例如 aiocqhttp:GroupMessage:123456，或直接写群号 / QQ 号', desc: '只对这些会话主动开口。支持完整 unified_msg_origin，也可以直接填群号 / QQ 号；留空 = 不开启（保守）。一行一个，也可用逗号分隔。' },
+        { path: 'proactive.timeline', type: 'text', label: '可打扰度时间线', def: '0-8=blocked,8-10=low,10-12=normal,12-14=normal,14-19=low,19-23=high,23-24=low', rows: 3, placeholder: '起始-结束=档位，逗号或换行分隔；档位取 blocked / low / normal / high', desc: '格式 起始-结束=档位，逗号或换行分隔，档位取 blocked / low / normal / high。没写到的时间一律按 blocked（请勿打扰）处理。' },
+        { path: 'proactive.probability.blocked', type: 'number', label: '请勿打扰档概率', def: 0, min: 0, max: 1, step: 0.05, desc: '默认 0 = 硬闸门。调大于 0 才会让 blocked 时段重新参与掷骰子。' },
+        { path: 'proactive.probability.low', type: 'number', label: '低可打扰档概率', def: 0.25, min: 0, max: 1, step: 0.05 },
+        { path: 'proactive.probability.normal', type: 'number', label: '正常可打扰档概率', def: 0.7, min: 0, max: 1, step: 0.05 },
+        { path: 'proactive.probability.high', type: 'number', label: '高可打扰档概率', def: 1, min: 0, max: 1, step: 0.05, desc: '实际开口概率 = 档位概率 × 当前时段活跃度（作息表），所以活跃度 0 时永远不会主动。' },
+        { path: 'proactive.min_idle_minutes', type: 'number', label: '至少安静这么久才可能开口', def: 30, min: 0, max: 1440, step: 1, unit: '分钟', desc: '距上次收到用户消息至少空闲这么久才考虑主动。0 = 不限制。' },
+        { path: 'proactive.cooldown_minutes', type: 'number', label: '同一会话两次主动的最小间隔', def: 45, min: 0, max: 1440, step: 1, unit: '分钟' },
+        { path: 'proactive.daily_budget', type: 'number', label: '每会话每天最多主动', def: 3, min: 0, max: 100, step: 1, unit: '条', desc: '0 = 一条都不发。' },
+        { path: 'proactive.max_unanswered', type: 'number', label: '连续几条没回复就停手', def: 2, min: 0, max: 100, step: 1, unit: '条', desc: '连续主动未获回复达到此数就停手，收到用户消息即清零。0 = 不限制。' },
+        { path: 'proactive.jitter_minutes', type: 'number', label: '开口时刻抖动半径', def: 12, min: 0, max: 180, step: 1, unit: '分钟', desc: '真人不会准点，开口时刻在这个范围内随机浮动。' },
+        { path: 'proactive.check_interval_seconds', type: 'number', label: '后台检查频率', def: 60, min: 5, max: 3600, step: 1, unit: '秒', desc: '最小 5 秒，避免忙等。' },
+        { path: 'proactive.llm_timeout_seconds', type: 'number', label: '单次生成超时', def: 45, min: 1, max: 600, step: 1, unit: '秒', desc: 'provider 卡住时的硬超时；超时就放弃本次，绝不阻塞后台循环。' },
+        { path: 'proactive.system_prompt', type: 'text', label: '额外人设提示（可选）', def: '', rows: 3, placeholder: '留空 = 用 AstrBot 的默认人设', desc: '主动开口时额外追加的人设提示。留空 = 用 AstrBot 的默认人设。' },
+        { path: 'proactive.prompt_template', type: 'text', label: '主动开口提示词模板', def: '（现在没什么事，想主动找 Ta 说句话。可以参考最近的聊天，但不要复述。）', rows: 3, desc: '生成主动内容时用的提示模板。' }
       ]
     },
     {
@@ -281,6 +303,11 @@
       var shown = arr.slice(0, 6).join('、');
       return arr.length + ' 项（' + shown + (arr.length > 6 ? '…' : '') + '）';
     }
+    if (f.type === 'text') {                       // 多行纯文本：整段显示，太长就截断
+      var t = String(v === null || v === undefined ? '' : v).trim();
+      if (!t) return '空';
+      return t.length > 26 ? t.slice(0, 26) + '…' : t;
+    }
     var n = Number(v);
     if (!isFinite(n)) n = f.def;
     return String(n) + (f.unit ? ' ' + f.unit : '');
@@ -289,6 +316,7 @@
     if (f.type === 'bool') return v ? '1' : '0';
     if (f.type === 'number') { var n = Number(v); return isFinite(n) ? String(n) : 'null'; }
     if (f.type === 'textarea') return JSON.stringify(textToList(v));
+    if (f.type === 'text') return String(v === null || v === undefined ? '' : v).trim();
     return v === null || v === undefined ? '' : String(v);
   }
   function readCtrl(f) {
@@ -306,6 +334,7 @@
       return n;
     }
     if (f.type === 'textarea') return textToList(el.value);
+    if (f.type === 'text') return String(el.value).trim();   // 多行纯文本按整段字符串提交，只去掉首尾空白
     return el.value;
   }
 
@@ -327,7 +356,7 @@
   function buildField(f) {
     var wrap = document.createElement('div');
     wrap.className = 'field';
-    if (f.type === 'textarea') wrap.className += ' wide';   // 名单类字段整行铺开，方便粘贴一堆 QQ 号 / umo
+    if (f.type === 'textarea' || f.type === 'text') wrap.className += ' wide';   // 名单/长文本整行铺开，方便粘贴一堆 QQ 号、umo 或长提示词
 
     var top = document.createElement('div');
     top.className = 'ftop';
@@ -360,9 +389,10 @@
         el.appendChild(opt);
       });
       ctlWrap.appendChild(el);
-    } else if (f.type === 'textarea') {
+    } else if (f.type === 'textarea' || f.type === 'text') {
+      // textarea = 名单（切分成数组）；text = 多行纯文本（整段字符串，不切分）
       el = document.createElement('textarea');
-      el.rows = f.rows || 3;
+      el.rows = f.rows || (f.type === 'text' ? 2 : 3);
       if (f.placeholder) el.placeholder = f.placeholder;
       ctlWrap.appendChild(el);
     } else {
@@ -437,6 +467,8 @@
         if (!el.value) el.value = String(f.def);
       } else if (f.type === 'textarea') {
         el.value = listToText(v);
+      } else if (f.type === 'text') {
+        el.value = (v === undefined || v === null) ? String(f.def) : String(v);
       } else {
         el.value = String(numOr(v, f.def));
       }

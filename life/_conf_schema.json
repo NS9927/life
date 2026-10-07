@@ -215,12 +215,12 @@
     "type": "object",
     "items": {
       "enable": {
-        "description": "启用主动开口（★默认关闭）",
+        "description": "启用主动开口。默认关闭；还要在下面填白名单才会真正生效（两道保险）",
         "type": "bool",
         "default": false
       },
       "session_list": {
-        "description": "只对这些会话生效（unified_msg_origin）。留空 = 不生效（保守）",
+        "description": "群聊 / 私聊白名单（每行或每项一个会话）。支持完整 umo（如 aiocqhttp:GroupMessage:123456）或直接填群号 / QQ号；留空 = 不开启主动开口",
         "type": "list",
         "default": []
       },
