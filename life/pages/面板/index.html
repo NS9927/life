@@ -1,0 +1,1767 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>拟人 · 控制台 · life</title>
+<style>
+  *{box-sizing:border-box}
+  :root{
+    --bg:#1b1b1f; --card:#232329; --card2:#2a2a33; --bd:#34343f; --bd2:#3d3d4a;
+    --tx:#e9e9ef; --tx2:#a3a3b2; --tx3:#747482;
+    --ac:#4c8dff; --ac2:#3b74d8; --acs:rgba(76,141,255,.16);
+    --ok:#3ecf8e; --wn:#ffb020; --er:#ff6060;
+  }
+  html[data-theme="light"]{
+    --bg:#f5f5f7; --card:#ffffff; --card2:#f0f0f4; --bd:#e3e3ea; --bd2:#d5d5df;
+    --tx:#1c1c22; --tx2:#5b5b68; --tx3:#8d8d99; --acs:rgba(76,141,255,.13);
+  }
+  [hidden]{display:none !important}
+  body{
+    margin:0;background:var(--bg);color:var(--tx);
+    font-family:system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    font-size:14px;line-height:1.55;-webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1100px;margin:0 auto;padding:22px 22px 40px}
+  .head{margin-bottom:18px}
+  .row{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  h1{font-size:22px;font-weight:650;margin:0;letter-spacing:.2px}
+  .ver{font-size:12px;color:var(--tx3)}
+  .sub{color:var(--tx2);margin:6px 0 0;font-size:13px}
+  .errbar{
+    margin-top:12px;padding:9px 12px;border-radius:10px;font-size:13px;
+    background:rgba(255,96,96,.12);border:1px solid rgba(255,96,96,.45);color:var(--er);
+  }
+  .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:16px 18px;margin-bottom:14px}
+  .card h2{font-size:15px;margin:0;font-weight:650}
+  .gdesc{color:var(--tx2);font-size:12px;margin:5px 0 4px}
+  .field{padding:12px 0;border-top:1px solid var(--bd)}
+  .card .field:first-of-type{border-top:none}
+  .ftop{display:flex;align-items:center;gap:14px;justify-content:space-between;flex-wrap:wrap}
+  .flabel{font-size:13px;flex:1 1 260px;min-width:220px}
+  .flabel.locked{color:var(--tx2)}
+  .fctl{display:flex;align-items:center;gap:7px;flex:0 0 auto}
+  .unit{font-size:12px;color:var(--tx3);min-width:22px}
+  .field.wide .ftop{display:block}
+  .field.wide .fctl{margin-top:7px}
+  .fdesc{color:var(--tx2);font-size:12px;margin-top:4px;max-width:760px}
+  .fmeta{color:var(--tx3);font-size:12px;margin-top:4px}
+  .fmeta b{color:var(--tx2);font-weight:600}
+  .badge{
+    display:inline-block;margin-left:6px;padding:1px 7px;border-radius:999px;font-size:11px;
+    background:var(--acs);color:var(--ac);border:1px solid rgba(76,141,255,.4);
+  }
+  .badge.warn{background:rgba(255,176,32,.14);color:var(--wn);border-color:rgba(255,176,32,.45)}
+  .badge.def{background:transparent;color:var(--tx3);border-color:var(--bd2)}
+  input[type=number],input[type=text],select,textarea{
+    font:inherit;color:var(--tx);background:var(--card2);border:1px solid var(--bd2);
+    border-radius:8px;padding:5px 8px;
+  }
+  input[type=number]{width:104px}
+  select{min-width:190px}
+  textarea{width:100%;min-height:64px;resize:vertical;font-family:inherit;line-height:1.5}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:var(--ac);box-shadow:0 0 0 3px var(--acs)}
+  input:disabled{opacity:.6;cursor:not-allowed}
+  input.inval{border-color:var(--er)}
+  .switch{position:relative;display:inline-flex;align-items:center;cursor:pointer;width:44px;height:24px;flex:0 0 auto}
+  .switch input{position:absolute;opacity:0;width:0;height:0}
+  .switch .track{
+    position:absolute;inset:0;background:var(--card2);border:1px solid var(--bd2);
+    border-radius:999px;transition:background .12s,border-color .12s;
+  }
+  .switch .track::after{
+    content:"";position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;
+    background:var(--tx3);transition:transform .12s,background .12s;
+  }
+  .switch input:checked + .track{background:var(--ac);border-color:var(--ac)}
+  .switch input:checked + .track::after{transform:translateX(20px);background:#fff}
+  .switch input:focus-visible + .track{box-shadow:0 0 0 3px var(--acs)}
+  .note{color:var(--tx2);font-size:12px;margin:0}
+  .note b{color:var(--tx)}
+  .stickybar{
+    position:sticky;bottom:0;display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+    margin-top:6px;padding:12px 16px;background:var(--card);border:1px solid var(--bd);
+    border-radius:12px;box-shadow:0 -6px 22px rgba(0,0,0,.18);
+  }
+  .dirtyhint{color:var(--tx2);font-size:12px;flex:1 1 auto}
+  .dirtyhint.on{color:var(--wn)}
+  .btn{
+    font:inherit;color:var(--tx);background:var(--card2);border:1px solid var(--bd2);
+    border-radius:10px;padding:7px 14px;cursor:pointer;
+  }
+  .btn:hover:not(:disabled){background:var(--bd)}
+  .btn:disabled{opacity:.45;cursor:default}
+  .btn.primary{background:var(--ac);border-color:var(--ac);color:#fff}
+  .btn.primary:hover:not(:disabled){background:var(--ac2)}
+  .btn.primary:disabled{background:var(--card2);border-color:var(--bd2);color:var(--tx2)}
+  .btn.primary.dirty{box-shadow:0 0 0 3px var(--acs)}
+  .toast{
+    position:fixed;left:50%;bottom:26px;transform:translate(-50%,14px);
+    background:var(--card2);border:1px solid var(--bd2);color:var(--tx);
+    border-radius:10px;padding:9px 18px;font-size:13px;opacity:0;pointer-events:none;
+    transition:opacity .16s ease,transform .16s ease;box-shadow:0 8px 26px rgba(0,0,0,.35);z-index:50;
+  }
+  .toast.show{opacity:1;transform:translate(-50%,0)}
+  @media (max-width:780px){
+    .wrap{padding:16px 14px 30px}
+    select{min-width:150px}
+    .flabel{min-width:160px}
+  }
+  /* 页内左侧菜单（形态照 steam_status_monitor_V3：左侧竖排、图标+文字、当前项高亮） */
+  #app{display:flex;min-height:100vh;align-items:stretch}
+  #sidebar{width:232px;flex-shrink:0;background:var(--card);border-right:1px solid var(--bd);display:flex;flex-direction:column}
+  .sidebar-header{padding:18px 16px;font-size:15px;font-weight:650;color:var(--tx);display:flex;align-items:center;gap:10px;border-bottom:1px solid var(--bd)}
+  .sidebar-header svg{color:var(--ac);flex:0 0 auto}
+  .nav-list{list-style:none;margin:0;padding:8px 0;flex:1;overflow-y:auto}
+  .nav-item{padding:11px 16px;display:flex;align-items:center;gap:10px;cursor:pointer;color:var(--tx2);border-left:3px solid transparent;transition:background .15s,color .15s;font-size:14px;user-select:none}
+  .nav-item:hover{color:var(--tx);background:rgba(127,127,127,.09)}
+  .nav-item.active{color:var(--ac);border-left-color:var(--ac);background:var(--acs)}
+  .nav-item svg{flex:0 0 auto}
+  .nav-dot{display:none;width:7px;height:7px;border-radius:50%;background:var(--wn);margin-left:auto}
+  .nav-item.dirty .nav-dot{display:block}
+  #content{flex:1;min-width:0;max-width:1100px;padding:24px 26px 56px}
+  .pane{display:none}
+  .pane.active{display:block}
+  @media (max-width:860px){
+    #app{flex-direction:column}
+    #sidebar{width:auto;border-right:none;border-bottom:1px solid var(--bd)}
+    .nav-list{display:flex;flex-wrap:wrap;padding:6px 8px}
+    .nav-item{border-left:none;border-bottom:3px solid transparent;padding:9px 12px}
+    .nav-item.active{border-left-color:transparent;border-bottom-color:var(--ac)}
+    .nav-dot{margin-left:6px}
+    #content{padding:16px 14px 50px}
+  }
+
+  #ch-app{
+    --ch-bg:#1b1b1f; --ch-card:#232329; --ch-card2:#2a2a33; --ch-bd:#34343f; --ch-bd2:#3d3d4a;
+    --ch-tx:#e9e9ef; --ch-tx2:#a3a3b2; --ch-tx3:#747482;
+    --ch-ac:#4c8dff; --ch-ac2:#3b74d8; --ch-acs:rgba(76,141,255,.16);
+    --ch-ok:#3ecf8e; --ch-wn:#ffb020; --ch-er:#ff6060;
+    --ch-grid:#2f2f3a; --ch-main:#9a9aff;
+  }
+  html[data-theme="light"] #ch-app{
+    --ch-bg:#f5f5f7; --ch-card:#ffffff; --ch-card2:#f0f0f4; --ch-bd:#e3e3ea; --ch-bd2:#d5d5df;
+    --ch-tx:#1c1c22; --ch-tx2:#5b5b68; --ch-tx3:#8d8d99;
+    --ch-acs:rgba(76,141,255,.13); --ch-grid:#e7e7ee; --ch-main:#5b5bd6;
+  }
+  #ch-app .ver{font-size:12px;color:var(--ch-tx3)}
+  #ch-app .errbar{
+    margin-top:12px;padding:9px 12px;border-radius:10px;font-size:13px;
+    background:rgba(255,96,96,.12);border:1px solid rgba(255,96,96,.45);color:var(--ch-er);
+  }
+  #ch-app .status{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}
+  #ch-app .chip{
+    display:inline-flex;align-items:center;gap:6px;background:var(--ch-card);
+    border:1px solid var(--ch-bd);border-radius:999px;padding:4px 12px;font-size:12px;color:var(--ch-tx2);
+  }
+  #ch-app .chip b{color:var(--ch-tx);font-weight:600}
+  #ch-app .chip.now{border-color:var(--ch-ac);background:var(--ch-acs);color:var(--ch-tx)}
+  #ch-app .chip.sleep{border-color:var(--ch-wn);color:var(--ch-wn)}
+  #ch-app .chip.d b{color:var(--ch-er)}
+  #ch-app .chip.a b{color:var(--ch-ok)}
+  #ch-app .chip.q b{color:var(--ch-wn)}
+  #ch-app .chip.f b{color:var(--ch-ac)}
+  #ch-app .card{background:var(--ch-card);border:1px solid var(--ch-bd);border-radius:12px;padding:16px}
+  #ch-app .toolbar{display:flex;flex-wrap:wrap;gap:14px 18px;align-items:flex-end}
+  #ch-app .tb-group{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+  #ch-app .tb-group.actions{margin-left:auto;gap:10px}
+  #ch-app .tb-label{color:var(--ch-tx3);font-size:12px}
+  #ch-app .fld{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--ch-tx2)}
+  #ch-app .fld input{width:90px}
+  #ch-app input[type=number]{
+    font:inherit;color:var(--ch-tx);background:var(--ch-card2);border:1px solid var(--ch-bd2);
+    border-radius:8px;padding:5px 8px;
+  }
+  #ch-app input[type=number]:focus{outline:none;border-color:var(--ch-ac);box-shadow:0 0 0 3px var(--ch-acs)}
+  #ch-app .btn{
+    font:inherit;color:var(--ch-tx);background:var(--ch-card2);border:1px solid var(--ch-bd2);
+    border-radius:10px;padding:7px 14px;cursor:pointer;
+  }
+  #ch-app .btn:hover{background:var(--ch-bd)}
+  #ch-app .btn:disabled{opacity:.45;cursor:default}
+  #ch-app .btn.primary{background:var(--ch-ac);border-color:var(--ch-ac);color:#fff}
+  #ch-app .btn.primary:hover:not(:disabled){background:var(--ch-ac2)}
+  #ch-app .btn.primary:disabled{background:var(--ch-card2);border-color:var(--ch-bd2);color:var(--ch-tx2)}
+  #ch-app .btn.primary.dirty{box-shadow:0 0 0 3px var(--ch-acs)}
+  #ch-app .presets{display:flex;flex-wrap:wrap;gap:8px}
+  #ch-app .legend{display:flex;flex-wrap:wrap;gap:16px;margin:16px 0 4px;font-size:12px;color:var(--ch-tx2)}
+  #ch-app .lg{display:inline-flex;align-items:center;gap:7px}
+  #ch-app .sw{display:inline-block;width:16px;height:0;border-top-width:3px;border-top-style:solid;border-radius:2px}
+  #ch-app .sw.main{border-color:var(--ch-main)}
+  #ch-app .sw.prev{border-color:var(--ch-ac);opacity:.65;border-top-style:dashed}
+  #ch-app .sw.now{border-color:var(--ch-wn);border-top-style:dashed;border-top-width:2px}
+  #ch-app .chartwrap{position:relative;margin-top:8px;width:100%}
+  #ch-app svg#ch-chart{display:block;width:100%;touch-action:none;user-select:none;-webkit-user-select:none}
+  #ch-app .grid{stroke:var(--ch-grid);stroke-width:1}
+  #ch-app .gridv{stroke:var(--ch-grid);stroke-width:1;stroke-dasharray:2 4;opacity:.75}
+  #ch-app .ax{fill:var(--ch-tx3);font-size:11px;font-family:inherit}
+  #ch-app .mainline{fill:none;stroke:var(--ch-main);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+  #ch-app .prev{fill:none;stroke:var(--ch-ac);stroke-width:2.5;opacity:.62;stroke-linejoin:round}
+  #ch-app .nowline{stroke:var(--ch-wn);stroke-width:1.5;stroke-dasharray:4 3;opacity:.9}
+  #ch-app .nowtext{fill:var(--ch-wn);font-size:11px;text-anchor:middle;font-family:inherit}
+  #ch-app .hit{fill:transparent;cursor:ns-resize}
+  #ch-app .dot{fill:var(--ch-card);stroke:var(--ch-ac);stroke-width:2;cursor:ns-resize;outline:none}
+  #ch-app .dot:hover{fill:var(--ch-acs)}
+  #ch-app .dot:focus{stroke:var(--ch-wn);stroke-width:3}
+  #ch-app .dot.active{fill:var(--ch-ac)}
+  #ch-app .tip{
+    position:absolute;transform:translate(-50%,-100%);background:var(--ch-card2);
+    border:1px solid var(--ch-bd2);color:var(--ch-tx);padding:3px 9px;border-radius:8px;
+    font-size:12px;white-space:nowrap;pointer-events:none;box-shadow:0 6px 18px rgba(0,0,0,.28);
+  }
+  #ch-app .hint{color:var(--ch-tx2);font-size:12px;margin:12px 0 0}
+  #ch-app .hint b{color:var(--ch-tx)}
+  #ch-app kbd{
+    font:inherit;font-size:11px;background:var(--ch-card2);border:1px solid var(--ch-bd2);
+    border-bottom-width:2px;border-radius:5px;padding:0 5px;color:var(--ch-tx);
+  }
+  #ch-app .toast{
+    position:fixed;left:50%;bottom:26px;transform:translate(-50%,14px);
+    background:var(--ch-card2);border:1px solid var(--ch-bd2);color:var(--ch-tx);
+    border-radius:10px;padding:9px 18px;font-size:13px;opacity:0;pointer-events:none;
+    transition:opacity .16s ease,transform .16s ease;box-shadow:0 8px 26px rgba(0,0,0,.35);z-index:50;
+  }
+  #ch-app .toast.show{opacity:1;transform:translate(-50%,0)}
+  @media (max-width:780px){
+    #ch-app .tb-group.actions{margin-left:0;width:100%}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <nav id="sidebar" aria-label="页面导航">
+    <div class="sidebar-header">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 5-3 8-7 9-4-1-7-4-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg>
+      <span>拟人 · 控制台</span>
+    </div>
+    <ul class="nav-list" id="navList" role="tablist" aria-label="页面板块"></ul>
+  </nav>
+  <main id="content">
+    <header class="head">
+      <div class="row">
+        <h1>拟人 · 控制台</h1>
+        <span id="ver" class="ver"></span>
+      </div>
+      <p class="sub">拟人化闸门 —— 按作息概率放行消息，被点名分档回复，防两个 bot 互刷烧 token。左侧 6 项：作息活跃度（折线图）/ 基础闸门 / 回话策略 / 防刷与睡眠 / 主动开口 / 打字与拟人；「保存」一次提交全部 71 个设置项。</p>
+      <div id="errBar" class="errbar" hidden></div>
+    </header>
+    <div id="groups"></div>
+      <section id="ch-app" class="pane" data-pane="curve">
+        <div id="ch-status" class="status"></div>
+        <div id="ch-errBar" class="errbar" hidden></div>
+<section class="card">
+    <div class="toolbar">
+      <div class="tb-group">
+        <span class="tb-label">预设</span>
+        <span id="ch-presets" class="presets"></span>
+      </div>
+      <div class="tb-group">
+        <label class="fld">插值半径（分钟）
+          <input id="ch-inpInterp" type="number" min="0" max="60" step="1">
+        </label>
+        <label class="fld">周末系数
+          <input id="ch-inpMul" type="number" min="0" max="2" step="0.05">
+        </label>
+        <label class="fld">周末睡眠后移（小时）
+          <input id="ch-inpShift" type="number" min="0" max="4" step="1">
+        </label>
+      </div>
+      <div class="tb-group actions">
+        <button id="ch-btnUndo" class="btn" type="button">撤销</button>
+        <button id="ch-btnSave" class="btn primary" type="button">保存</button>
+      </div>
+    </div>
+
+    <div class="legend">
+      <span class="lg"><i class="sw main"></i>你设的 48 档（每半小时一档，折线）</span>
+      <span class="lg"><i class="sw prev"></i>插值后机器人实际使用的曲线（后端计算）</span>
+      <span class="lg"><i class="sw now"></i>当前时刻</span>
+    </div>
+
+    <div class="chartwrap" id="ch-chartwrap">
+      <svg id="ch-chart" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div class="tip" id="ch-tip" hidden></div>
+    </div>
+
+    <p class="hint">
+      拖动圆点改权重（0–100，只能上下）。默认<b>只改当前这一个点</b>；按住 <kbd>Shift</kbd> 拖动则<b>带动该点及其右侧所有点一起平移</b>（同一 delta，夹在 0–100）。
+      键盘：<kbd>↑</kbd>/<kbd>↓</kbd> ±1，<kbd>Shift</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd> ±10，<kbd>PgUp</kbd>/<kbd>PgDn</kbd> ±25。
+      <b>双击</b>该点置 0（睡眠），再双击恢复原值。
+    </p>
+  </section>
+      </section>
+      <div id="ch-toast" class="toast"></div>
+    <div class="card">
+      <p class="note">本页<b>只保存本页的字段</b>（schema 全部 71 个叶子键，含折线图那 4 个）：左侧菜单各项互相独立、切来切去不会丢未保存的修改；折线图拖动/双击/键盘改完会自动保存，也可以随时点下面的「保存」一次提交全部。</p>
+    </div>
+    <div class="stickybar">
+      <span id="dirtyHint" class="dirtyhint">没有未保存的修改</span>
+      <button id="btnReload" class="btn" type="button">重新载入</button>
+      <button id="btnSave" class="btn primary" type="button">保存</button>
+    </div>
+  </main>
+</div>
+<div id="toast" class="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  /* ==================== 常量 ==================== */
+  var N = 48;                    // 48 个半小时档
+  var H = 380;                   // SVG 高度
+  var PT = 20, PB = 34, PL = 56, PR = 24;
+  var HIT_RADIUS = 16;           // 「抓得住」的半径（SVG 单位）：命中圈画多大，按下的判定就用多大
+  var DEFAULT_WEIGHTS_TEXT = '0-2=80\n2-8=0\n8-10=10\n10-12=30\n12-14=40\n14-19=30\n19-23=80\n23-24=60';
+
+  var $ = function (s) { return document.querySelector(s); };
+  var bridge = window.AstrBotPluginPage || null;
+
+  var r2 = function (n) { return Math.round(n * 100) / 100; };
+  var clamp100 = function (v) { var n = Number(v); return Math.max(0, Math.min(100, Math.round(isFinite(n) ? n : 0))); };
+  var numOr = function (v, d) { var n = Number(v); return isFinite(n) ? n : d; };
+  var pad2 = function (n) { return (n < 10 ? '0' : '') + n; };
+  var esc = function (s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  };
+  var errMsg = function (e) { return (e && (e.message || e.error)) ? String(e.message || e.error) : String(e); };
+
+  /* ==================== DOM ==================== */
+  var chartwrap = $('#ch-chartwrap');
+  var svg = $('#ch-chart');
+  var tip = $('#ch-tip');
+  var statusEl = $('#ch-status');
+  var verEl = $('#ch-ver');
+  var errBar = $('#ch-errBar');
+  var toastEl = $('#ch-toast');
+  var inpInterp = $('#ch-inpInterp');
+  var inpMul = $('#ch-inpMul');
+  var inpShift = $('#ch-inpShift');
+  var btnSave = $('#ch-btnSave');
+  var btnUndo = $('#ch-btnUndo');
+
+  /* ==================== 状态 ==================== */
+  var state = {
+    weights: new Array(N).fill(30),
+    interpolate: 45,
+    weekendMul: 1.3,
+    weekendShift: 1,
+    series: null,
+    now: null,
+    stats: null,
+    version: '',
+    zeroed: {},
+    dragging: null,
+    seq: 0
+  };
+  var baseline = null;
+  var nowHours = null;
+
+  function snapshot() {
+    return {
+      weights: state.weights.slice(),
+      interpolate: state.interpolate,
+      mul: state.weekendMul,
+      shift: state.weekendShift
+    };
+  }
+  function restore(s) {
+    state.weights = s.weights.slice();
+    state.interpolate = s.interpolate;
+    state.weekendMul = s.mul;
+    state.weekendShift = s.shift;
+  }
+  function isDirty() { return JSON.stringify(snapshot()) !== JSON.stringify(baseline); }
+
+  /* ==================== 时段文本 <-> 48 档 ==================== */
+  function parseRanges(text) {
+    var spans = [];
+    String(text || '').split(/\r?\n/).forEach(function (line) {
+      var m = line.trim().match(/^(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*=\s*(-?\d+(?:\.\d+)?)\s*$/);
+      if (!m) return;
+      var a = parseFloat(m[1]);
+      var b = parseFloat(m[2]);
+      if (b <= a) b += 24;
+      spans.push({ a: a, b: b, v: clamp100(m[3]) });
+    });
+    return spans;
+  }
+  function weightsFromText(text) {
+    var out = new Array(N).fill(0);
+    var spans = parseRanges(text);
+    for (var i = 0; i < N; i++) {
+      var t = i * 0.5;
+      for (var k = 0; k < spans.length; k++) {
+        if (t >= spans[k].a && t < spans[k].b) { out[i] = spans[k].v; break; }
+      }
+    }
+    return out;
+  }
+  function paintSpan(out, text, value) {
+    var spans = parseRanges(text);
+    for (var i = 0; i < N; i++) {
+      var t = i * 0.5;
+      for (var k = 0; k < spans.length; k++) {
+        if (t >= spans[k].a && t < spans[k].b) { out[i] = value; break; }
+      }
+    }
+    return out;
+  }
+  function normalizeWeights(arr) {
+    var out = new Array(N).fill(0);
+    if (Array.isArray(arr)) {
+      for (var i = 0; i < N; i++) { if (arr[i] !== null && arr[i] !== undefined) out[i] = clamp100(arr[i]); }
+    }
+    return out;
+  }
+  function slotLabel(i) {
+    var t = i * 0.5;
+    return pad2(Math.floor(t)) + ':' + (t % 1 ? '30' : '00');
+  }
+  function hhmm(hours) {
+    var t = Math.round(hours * 60);
+    return pad2(Math.floor(t / 60) % 24) + ':' + pad2(t % 60);
+  }
+
+  /* ==================== 预设 ==================== */
+  var PRESETS = [
+    { name: '夜猫子', hint: '02:00 睡、10:00 才醒（默认表）', make: function () { return weightsFromText(DEFAULT_WEIGHTS_TEXT); } },
+    { name: '早睡早起', hint: '23:00–07:00 睡眠，其余平坦 50', make: function () { return paintSpan(new Array(N).fill(50), '23-7=0', 0); } },
+    { name: '全天半强度', hint: '全部 50', make: function () { return new Array(N).fill(50); } },
+    { name: '全天静音', hint: '全部 0（基本不说话）', make: function () { return new Array(N).fill(0); } }
+  ];
+
+  function buildToolbar() {
+    var holder = $('#ch-presets');
+    holder.innerHTML = '';
+    PRESETS.forEach(function (p) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'btn';
+      b.textContent = p.name;
+      b.title = p.hint;
+      b.addEventListener('click', function () {
+        state.weights = p.make();
+        state.zeroed = {};
+        updateChart();
+        markDirty();
+        schedulePreview();
+        scheduleAutoSave();
+        toast('已套用预设：' + p.name + '（记得点保存）');
+      });
+      holder.appendChild(b);
+    });
+  }
+
+  /* ==================== 图表 ==================== */
+  var W = 960, plotW = W - PL - PR, plotH = H - PT - PB;
+  var mainPath = null, prevPath = null, nowLine = null, nowText = null;
+  var dotEls = [], hitEls = [];
+
+  function xAt(t) { return PL + (t / 24) * plotW; }
+  function yAt(v) { return PT + plotH * (1 - v / 100); }
+
+  function buildChart() {
+    var cw = chartwrap.clientWidth || 0;
+    W = Math.max(520, Math.round(cw));
+    plotW = W - PL - PR;
+    plotH = H - PT - PB;
+    svg.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    svg.setAttribute('width', String(W));
+    svg.setAttribute('height', String(H));
+    svg.style.height = H + 'px';
+
+    var g = '';
+    [0, 25, 50, 75, 100].forEach(function (v) {
+      var y = r2(yAt(v));
+      g += '<line class="grid" x1="' + PL + '" y1="' + y + '" x2="' + (W - PR) + '" y2="' + y + '"/>';
+      g += '<text class="ax" x="' + (PL - 12) + '" y="' + (y + 4) + '" text-anchor="end">' + v + '</text>';
+    });
+    var xl = '';
+    for (var hh = 0; hh < 24; hh += 3) {
+      var x = r2(xAt(hh));
+      g += '<line class="gridv" x1="' + x + '" y1="' + PT + '" x2="' + x + '" y2="' + (PT + plotH) + '"/>';
+      xl += '<text class="ax" x="' + x + '" y="' + (PT + plotH + 22) + '" text-anchor="middle">' + pad2(hh) + ':00</text>';
+    }
+    var pts = '';
+    for (var i = 0; i < N; i++) {
+      var px = r2(xAt(i * 0.5 + 0.25));
+      pts += '<g class="ptg">'
+        + '<circle class="hit" data-i="' + i + '" cx="' + px + '" cy="0" r="' + HIT_RADIUS + '"/>'
+        + '<circle class="dot" data-i="' + i + '" cx="' + px + '" cy="0" r="5.5" tabindex="0" role="slider"'
+        + ' aria-label="' + slotLabel(i) + ' 权重" aria-valuemin="0" aria-valuemax="100"></circle>'
+        + '</g>';
+    }
+
+    svg.innerHTML =
+      '<g class="gGrid">' + g + '</g>'
+      + '<g class="gPrev"><path class="prev" d=""/></g>'
+      + '<g class="gMain"><path class="mainline" d=""/></g>'
+      + '<g class="gNow"><line class="nowline" x1="-99" y1="' + PT + '" x2="-99" y2="' + (PT + plotH) + '"/>'
+      + '<text class="nowtext" x="-99" y="' + (PT - 6) + '"></text></g>'
+      + '<g class="gPts">' + pts + '</g>'
+      + '<g class="gAxis">' + xl + '</g>';
+
+    mainPath = svg.querySelector('.mainline');
+    prevPath = svg.querySelector('.prev');
+    nowLine = svg.querySelector('.nowline');
+    nowText = svg.querySelector('.nowtext');
+    dotEls = Array.prototype.slice.call(svg.querySelectorAll('.dot'));
+    hitEls = Array.prototype.slice.call(svg.querySelectorAll('.hit'));
+
+    dotEls.forEach(function (el) {
+      el.addEventListener('keydown', onDotKey);
+      el.addEventListener('focus', onDotFocus);
+      el.addEventListener('blur', onDotBlur);
+    });
+    // .hit / .dot 这两个圆都不再各自接 pointerdown / dblclick，判定统一由 svg 上的 onChartDown /
+    // onChartDbl 用「离按下位置最近的点」来做。原因：可见 .dot 画在 .hit 之上、且靠元素命中时
+    // 「按在看得见的点心上」反而落到旁边那个点上；窄屏（≈720px）相邻圆心只有 ~12px，而命中圈 r=16
+    // 会互相重叠，谁在最上面只取决于 DOM 绘制顺序 —— 拖单点时就会抓错成右边的邻居。
+    // 现在 .hit 只负责鼠标形状（ns-resize）与悬停区域，几何上正好等于可抓取的半径。
+  }
+
+  // 主曲线：普通折线，依次穿过 48 个节点圆心（相邻两点之间是直线段，不是阶梯）。
+  // 首尾各补一个边界顶点：00:00 用第 1 个桶的权重，24:00 用最后一个桶的权重，让线铺满一整天。
+  function mainD() {
+    var w = state.weights;
+    var d = 'M ' + r2(xAt(0)) + ' ' + r2(yAt(w[0]));
+    for (var i = 0; i < N; i++) {
+      d += ' L ' + r2(xAt(i * 0.5 + 0.25)) + ' ' + r2(yAt(w[i]));
+    }
+    d += ' L ' + r2(xAt(24)) + ' ' + r2(yAt(w[N - 1]));
+    return d;
+  }
+  function seriesD(series) {
+    if (!series || !series.length) return '';
+    var d = '';
+    for (var j = 0; j < series.length; j++) {
+      var t = (j / series.length) * 24;
+      d += (j ? ' L ' : 'M ') + r2(xAt(t)) + ' ' + r2(yAt(clamp100(series[j] * 100)));
+    }
+    return d;
+  }
+
+  function updateChart() {
+    if (!mainPath) return;
+    mainPath.setAttribute('d', mainD());
+    for (var i = 0; i < N; i++) {
+      var cy = r2(yAt(state.weights[i]));
+      dotEls[i].setAttribute('cy', cy);
+      hitEls[i].setAttribute('cy', cy);
+      dotEls[i].setAttribute('aria-valuenow', String(state.weights[i]));
+    }
+    prevPath.setAttribute('d', seriesD(state.series));
+    if (nowHours !== null && isFinite(nowHours)) {
+      var x = Math.min(W - PR - 2, Math.max(PL + 2, xAt(nowHours)));
+      nowLine.setAttribute('x1', x);
+      nowLine.setAttribute('x2', x);
+      nowText.setAttribute('x', Math.min(W - PR - 22, Math.max(PL + 22, x)));
+      nowText.textContent = hhmm(nowHours);
+    } else {
+      nowLine.setAttribute('x1', -99);
+      nowLine.setAttribute('x2', -99);
+      nowText.textContent = '';
+    }
+  }
+
+  function markActive(i) {
+    dotEls.forEach(function (el, k) { el.classList.toggle('active', k === i); });
+  }
+  function showTip(i, v) {
+    if (!dotEls[i]) return;
+    var wr = chartwrap.getBoundingClientRect();
+    var sr = svg.getBoundingClientRect();
+    var sx = (sr.left - wr.left) + (xAt(i * 0.5 + 0.25) / W) * sr.width;
+    var sy = (sr.top - wr.top) + (yAt(v) / H) * sr.height;
+    tip.hidden = false;
+    tip.textContent = slotLabel(i) + ' · ' + Math.round(v);
+    tip.style.left = sx + 'px';
+    tip.style.top = (sy - 12) + 'px';
+  }
+  function hideTip() { tip.hidden = true; }
+
+  /* ==================== 交互 ==================== */
+  function valueFromEvent(e) {
+    var r = svg.getBoundingClientRect();
+    var y = (e.clientY - r.top) * (H / (r.height || H));
+    return clamp100(100 * (1 - (y - PT) / plotH));
+  }
+
+  // 拖动起点判定：找离按下位置最近的那个点（SVG 单位里的欧氏距离），而不是问「点到的是哪个元素」。
+  // 这样按在看得见的圆点正中间（距离 0）一定抓到它自己，稍微偏出圆点一点也能抓到（HIT_RADIUS 内），
+  // 并且不受两个圆谁画在上面的影响 —— 窄屏相邻命中圈重叠时也不会抓到隔壁点。
+  function nearestDotIndex(e) {
+    var r = svg.getBoundingClientRect();
+    var sx = (r.width || W) / W;
+    var sy = (r.height || H) / H;
+    var px = (e.clientX - r.left) / (sx || 1);
+    var py = (e.clientY - r.top) / (sy || 1);
+    var best = -1, bestD2 = HIT_RADIUS * HIT_RADIUS;
+    for (var i = 0; i < N; i++) {
+      var dx = px - xAt(i * 0.5 + 0.25);
+      var dy = py - yAt(state.weights[i]);
+      var d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) { bestD2 = d2; best = i; }
+    }
+    return best;
+  }
+
+  function onChartDown(e) {
+    if (e.button !== undefined && e.button !== 0) return;
+    var i = nearestDotIndex(e);
+    if (i < 0) return;                              // 离所有点都太远：不启动拖动
+    e.preventDefault();
+    try { svg.setPointerCapture(e.pointerId); } catch (err) { /* 忽略 */ }
+    state.dragging = {
+      i: i,
+      startV: state.weights[i],
+      base: state.weights.slice(),
+      moved: false
+    };
+    if (dotEls[i] && dotEls[i].focus) dotEls[i].focus({ preventScroll: true });   // 不能滚动页面，否则拖动中坐标系会跳
+    markActive(i);
+    showTip(i, state.weights[i]);
+  }
+
+  function onPointerMove(e) {
+    var d = state.dragging;
+    if (!d) return;
+    var v = valueFromEvent(e);
+    if (e.shiftKey) {
+      // Shift：带动该点及其右侧所有点一起平移（同一 delta，夹在 0~100）
+      var delta = v - d.startV;
+      for (var k = d.i; k < N; k++) {
+        var nv = clamp100(d.base[k] + delta);
+        if (nv !== state.weights[k]) {
+          state.weights[k] = nv;
+          delete state.zeroed[k];
+        }
+      }
+    } else {
+      // 默认：只改当前这一个点，其余 47 个不动
+      state.weights[d.i] = v;
+      delete state.zeroed[d.i];
+    }
+    d.moved = true;
+    updateChart();
+    showTip(d.i, state.weights[d.i]);
+    markDirty();
+    schedulePreview();
+    scheduleAutoSave();
+  }
+
+  function onPointerUp() {
+    var d = state.dragging;
+    if (!d) return;
+    state.dragging = null;
+    markActive(-1);
+    hideTip();
+    if (d.moved) {
+      markDirty();
+      doPreview();          // 松手立即再取一次（不防抖）
+      autoSave();           // 松手立即保存（不用点按钮）
+    }
+  }
+
+  function onDotKey(e) {
+    var i = Number(e.currentTarget.getAttribute('data-i'));
+    var d = 0;
+    if (e.key === 'ArrowUp') d = e.shiftKey ? 10 : 1;
+    else if (e.key === 'ArrowDown') d = e.shiftKey ? -10 : -1;
+    else if (e.key === 'PageUp') d = 25;
+    else if (e.key === 'PageDown') d = -25;
+    else return;
+    e.preventDefault();
+    state.weights[i] = clamp100(state.weights[i] + d);
+    delete state.zeroed[i];
+    updateChart();
+    markDirty();
+    schedulePreview();
+    scheduleAutoSave();
+    showTip(i, state.weights[i]);
+  }
+
+  // 双击归零 / 再双击恢复：和拖动用同一套「最近的点」判定，双击哪颗点就作用于哪颗点
+  function onChartDbl(e) {
+    var i = nearestDotIndex(e);
+    if (i < 0) return;
+    e.preventDefault();
+    if (Object.prototype.hasOwnProperty.call(state.zeroed, i)) {
+      state.weights[i] = state.zeroed[i];
+      delete state.zeroed[i];
+    } else {
+      state.zeroed[i] = state.weights[i];
+      state.weights[i] = 0;
+    }
+    updateChart();
+    markDirty();
+    doPreview();
+    showTip(i, state.weights[i]);
+    setTimeout(hideTip, 900);
+  }
+
+  function onDotFocus(e) {
+    if (state.dragging) return;
+    var i = Number(e.currentTarget.getAttribute('data-i'));
+    markActive(i);
+    showTip(i, state.weights[i]);
+  }
+  function onDotBlur() {
+    if (state.dragging) return;
+    markActive(-1);
+    hideTip();
+  }
+
+  /* ==================== 后端调用 ==================== */
+  function requireBridge() {
+    if (!window.AstrBotPluginPage || typeof window.AstrBotPluginPage.apiPost !== 'function') {
+      throw new Error('未检测到 AstrBot 页面桥接（window.AstrBotPluginPage），无法调用后端');
+    }
+  }
+  async function apiGet(path, params) {
+    requireBridge();
+    var res = await window.AstrBotPluginPage.apiGet('page/' + path, params || {});
+    if (res && res.ok === false) throw new Error(res.error || res.message || '后端返回 ok=false');
+    return res || {};
+  }
+  async function apiPost(path, payload) {
+    requireBridge();
+    var res = await window.AstrBotPluginPage.apiPost('page/' + path, payload || {});
+    if (res && res.ok === false) throw new Error(res.error || res.message || '后端返回 ok=false');
+    return res || {};
+  }
+
+  function weightsPayload() {
+    return state.weights.map(function (v) { return r2(v); });
+  }
+
+  var previewTimer = null;
+  function schedulePreview() {
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = setTimeout(function () {
+      previewTimer = null;
+      doPreview();
+    }, 150);                                   // 防抖 150ms
+  }
+
+  function fallbackSeries() {
+    // 离线（没有 bridge）时用阶梯近似，真实插值一律由后端算
+    var out = [];
+    for (var i = 0; i < N; i++) {
+      out.push(state.weights[i] / 100);
+      out.push(state.weights[i] / 100);
+    }
+    return out;
+  }
+
+  async function doPreview() {
+    var seq = ++state.seq;
+    if (!window.AstrBotPluginPage || typeof window.AstrBotPluginPage.apiPost !== 'function') {
+      state.series = fallbackSeries();
+      updateChart();
+      return;
+    }
+    var payload = { weights: weightsPayload(), interpolate_minutes: state.interpolate };
+    try {
+      var res = await apiPost('preview', payload);
+      if (seq !== state.seq) return;
+      if (Array.isArray(res.series) && res.series.length) {
+        state.series = res.series.map(Number);
+        updateChart();
+      }
+    } catch (err) {
+      if (seq !== state.seq) return;
+      showError('预览曲线获取失败：' + errMsg(err));
+    }
+  }
+
+  async function doSave() {
+    if (!isDirty()) return;
+    btnSave.disabled = true;
+    btnSave.textContent = '保存中…';
+    try {
+      var res = await apiPost('curve', {
+        weights: weightsPayload(),
+        interpolate_minutes: state.interpolate,
+        weekend_multiplier: state.weekendMul,
+        weekend_sleep_shift_hours: state.weekendShift
+      });
+      baseline = snapshot();
+      state.zeroed = {};
+      notify();
+      if (res && res.time_weights) state.savedText = res.time_weights;
+      hideError();
+      toast('已保存，立即生效');
+    } catch (err) {
+      showError('保存失败：' + errMsg(err));
+    } finally {
+      btnSave.textContent = '保存';
+      markDirty();
+    }
+  }
+
+  function doUndo() {
+    if (!baseline) return;
+    restore(baseline);
+    state.zeroed = {};
+    syncInputs();
+    updateChart();
+    markDirty();
+    schedulePreview();
+    scheduleAutoSave();
+    toast('已撤销到上次保存的状态');
+  }
+
+  /* ==================== 载入 / 渲染 ==================== */
+  function numFrom(resp, key, c, def) {
+    if (resp && resp[key] !== undefined && resp[key] !== null) return numOr(resp[key], def);
+    if (c && c[key] !== undefined && c[key] !== null) return numOr(c[key], def);
+    return def;
+  }
+
+  function loadConfig(resp) {
+    var r = resp || {};
+    var c = r.config || {};
+    var w = null;
+    if (Array.isArray(r.curve) && r.curve.length === N) w = normalizeWeights(r.curve);
+    else if (c.time_weights) w = weightsFromText(c.time_weights);
+    else if (r.curve_text) w = weightsFromText(r.curve_text);
+    else w = weightsFromText(DEFAULT_WEIGHTS_TEXT);
+
+    state.weights = w;
+    state.interpolate = numFrom(r, 'interpolate_minutes', c, 45);
+    state.weekendMul = numFrom(r, 'weekend_multiplier', c, 1.3);
+    state.weekendShift = numFrom(r, 'weekend_sleep_shift_hours', c, 1);
+    state.now = r.now || null;
+    state.stats = r.stats || null;
+    state.version = r.plugin_version || '';
+    nowHours = (state.now && isFinite(Number(state.now.hours))) ? Number(state.now.hours) : null;
+    baseline = snapshot();
+    syncInputs();
+  }
+
+  function syncInputs() {
+    inpInterp.value = String(state.interpolate);
+    inpMul.value = String(state.weekendMul);
+    inpShift.value = String(state.weekendShift);
+  }
+
+  function markDirty() {
+    var dirty = !!(baseline && isDirty());
+    btnSave.disabled = !dirty;
+    btnSave.classList.toggle('dirty', dirty);
+    btnUndo.disabled = !dirty;
+  }
+
+  function chip(label, val, cls) {
+    var v = (val === undefined || val === null) ? '–' : String(val);
+    return '<span class="chip ' + cls + '">' + esc(label) + ' <b>' + esc(v) + '</b></span>';
+  }
+  function renderStatus() {
+    var now = state.now;
+    var st = state.stats || {};
+    var h = '';
+    h += '<span class="chip now">' + esc(now && now.label ? now.label : '当前时刻未知') + '</span>';
+    if (now && now.sleeping) h += '<span class="chip sleep">睡眠中</span>';
+    h += chip('丢弃', st.drops, 'd');
+    h += chip('放行', st.allows, 'a');
+    h += chip('排队', st.queued, 'q');
+    h += chip('补发', st.flushed, 'f');
+    statusEl.innerHTML = h;
+    if (verEl) verEl.textContent = state.version ? ('插件 ' + state.version) : '';   // 版本号在宿主 header 上，这里可能没有元素
+  }
+
+  function showError(msg) { errBar.hidden = false; errBar.textContent = msg; }
+  function hideError() { errBar.hidden = true; errBar.textContent = ''; }
+
+  var toastTimer = null;
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 2600);
+  }
+
+  /* ==================== 主题 ==================== */
+  function applyTheme(c) {
+    var dark = !(c && c.isDark === false);
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  }
+
+  function bindStaticUI() {
+    svg.addEventListener('pointerdown', onChartDown);
+    svg.addEventListener('dblclick', onChartDbl);
+    svg.addEventListener('pointermove', onPointerMove);
+    svg.addEventListener('pointerup', onPointerUp);
+    svg.addEventListener('pointercancel', onPointerUp);
+    svg.addEventListener('pointerleave', function () { if (!state.dragging) hideTip(); });
+
+    inpInterp.addEventListener('input', function () {
+      state.interpolate = Math.max(0, Math.min(60, numOr(inpInterp.value, state.interpolate)));
+      markDirty();
+      schedulePreview();
+      scheduleAutoSave();
+    });
+    inpMul.addEventListener('input', function () {
+      state.weekendMul = Math.max(0, Math.min(2, numOr(inpMul.value, state.weekendMul)));
+      markDirty();
+    });
+    inpShift.addEventListener('input', function () {
+      state.weekendShift = Math.max(0, Math.min(4, numOr(inpShift.value, state.weekendShift)));
+      markDirty();
+    });
+
+    btnSave.addEventListener('click', doSave);
+    btnUndo.addEventListener('click', doUndo);
+
+    if (window.ResizeObserver) {
+      var raf = 0;
+      new ResizeObserver(function () {
+        if (state.dragging) return;
+        if (raf) cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(function () {
+          raf = 0;
+          buildChart();
+          updateChart();
+        });
+      }).observe(chartwrap);
+    } else {
+      window.addEventListener('resize', function () {
+        if (state.dragging) return;
+        buildChart();
+        updateChart();
+      });
+    }
+  }
+
+  function demoResponse() {
+    return {
+      ok: true,
+      config: {
+        time_weights: DEFAULT_WEIGHTS_TEXT,
+        interpolate_minutes: 45,
+        weekend_multiplier: 1.3,
+        weekend_sleep_shift_hours: 1
+      },
+      curve: weightsFromText(DEFAULT_WEIGHTS_TEXT),
+      now: { hours: 18.7, activity: 0.51, sleeping: false, label: '18:42 活跃度 0.51（工作日·离线演示）' },
+      stats: { drops: 12, allows: 5, queued: 0, flushed: 0, batched: 1 },
+      plugin_version: '离线预览'
+    };
+  }
+
+  async function waitBridge(timeoutMs) {
+    var t0 = Date.now();
+    while (!window.AstrBotPluginPage && (Date.now() - t0) < timeoutMs) {
+      await new Promise(function (r) { setTimeout(r, 100); });
+    }
+    return window.AstrBotPluginPage || null;
+  }
+
+  /* 原 init() 已被模块化接口取代（见下） */
+  async function __unused_init() {
+    applyTheme(null);                 // 默认暗色
+    buildToolbar();
+    bindStaticUI();
+    loadConfig(demoResponse());       // 先画出来，避免白屏
+    buildChart();
+    updateChart();
+    markDirty();
+    renderStatus();
+    state.series = fallbackSeries();  // 先给一条阶梯近似，等真实 config 回来再换成后端的插值曲线
+    updateChart();
+
+    bridge = await waitBridge(2500);
+    if (!bridge) {
+      showError('未检测到 AstrBot 页面桥接（window.AstrBotPluginPage）——当前为离线预览：可以拖动编辑，但预览曲线用阶梯近似，保存不可用。');
+      return;
+    }
+    try { if (typeof bridge.ready === 'function') await bridge.ready(); } catch (e) { /* 忽略 */ }
+    try {
+      if (typeof bridge.getContext === 'function') applyTheme(bridge.getContext());
+      if (typeof bridge.onContext === 'function') {
+        bridge.onContext(function (c) { applyTheme(c); });
+      }
+    } catch (e) { /* 忽略 */ }
+
+    try {
+      var resp = await apiGet('config', {});
+      loadConfig(resp);
+      hideError();
+      buildChart();
+      updateChart();
+      markDirty();
+      renderStatus();
+      doPreview();
+    } catch (err) {
+      showError('读取配置失败：' + errMsg(err));
+    }
+  }
+
+  /* ==================== 对外接口（宿主页调用） ==================== */
+  var adopted = false, built = false, saveTimer = null, savingNow = false, onDirty = null, onSaved = null;
+
+  function notify() { if (typeof onDirty === 'function') onDirty(); }
+
+  // 拖动过程中防抖自动保存（不打断手）；松手/双击等离散动作走 autoSave() 立即保存
+  function scheduleAutoSave() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(function () { saveTimer = null; autoSave(); }, 900);
+  }
+
+  function autoSave() {
+    if (!built || savingNow || !isDirty()) return;
+    savingNow = true;
+    apiPost('curve', {
+      weights: weightsPayload(),
+      interpolate_minutes: state.interpolate,
+      weekend_multiplier: state.weekendMul,
+      weekend_sleep_shift_hours: state.weekendShift
+    }).then(function () {
+      baseline = snapshot();
+      if (typeof onSaved === 'function') onSaved();
+      notify();
+    }).catch(function (err) {
+      showError('自动保存失败：' + errMsg(err));
+    }).then(function () { savingNow = false; });
+  }
+
+  // 宿主 GET page/config 之后把数据交进来（本模块不再自己请求）
+  function adopt(resp) {
+    loadConfig(resp || demoResponse());
+    adopted = true;
+    if (built) { renderStatus(); updateChart(); baseline = snapshot(); doPreview(); }
+    notify();
+  }
+
+  // 首次切到本面板时才初始化：这时面板可见，getBoundingClientRect 才量得到真实宽度
+  function ensure() {
+    if (built) { remeasure(); return; }
+    built = true;
+    applyTheme(null);
+    buildToolbar();
+    bindStaticUI();
+    if (!adopted) loadConfig(demoResponse());
+    buildChart();
+    updateChart();
+    markDirty();
+    renderStatus();
+    state.series = fallbackSeries();
+    updateChart();
+    doPreview();
+  }
+
+  // 面板从 display:none 变可见（或窗口 resize）后重算尺寸并重绘
+  function remeasure() { buildChart(); updateChart(); }
+
+  // 与后端 curve_to_time_weights 同格式：起始-结束=权重（供宿主保存整页时提交 time_weights）
+  function textFromWeights(w) {
+    var lines = [];
+    for (var i = 0; i < N; i++) {
+      var a = i * 0.5, b = a + 0.5;
+      lines.push(String(a) + '-' + String(b) + '=' + String(clamp100(w[i])));
+    }
+    return lines.join('\n');
+  }
+
+  window.LifeChart = {
+    adopt: adopt,
+    ensure: ensure,
+    remeasure: remeasure,
+    collect: function () {
+      return {
+        time_weights: textFromWeights(state.weights),
+        interpolate_minutes: state.interpolate,
+        weekend_multiplier: state.weekendMul,
+        weekend_sleep_shift_hours: state.weekendShift
+      };
+    },
+    isDirty: function () { return built && isDirty(); },
+    markSaved: function () { baseline = snapshot(); notify(); }
+  };
+  Object.defineProperty(window.LifeChart, 'onChange', { set: function (f) { onDirty = f; }, get: function () { return onDirty; } });
+  Object.defineProperty(window.LifeChart, 'onSaved', { set: function (f) { onSaved = f; }, get: function () { return onSaved; } });
+})();
+</script>
+<script>
+(function () {
+  'use strict';
+
+  var $ = function (s) { return document.querySelector(s); };
+  var bridge = window.AstrBotPluginPage || null;
+
+  var numOr = function (v, d) { var n = Number(v); return isFinite(n) ? n : d; };
+  var esc = function (s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  };
+  var errMsg = function (e) { return (e && (e.message || e.error)) ? String(e.message || e.error) : String(e); };
+
+  /* ==================== 字段定义（键名与 _conf_schema.json 一致） ==================== */
+  // 下面的卡片就是原来 4 个页面的卡片，字段定义一字节未改；SECTIONS 决定每张卡属于哪个 tab。
+  var CARDS = [
+    {
+      title: '基础',
+      desc: '总开关与基础概率。实际放行概率 ≈ 基础概率 × 该时刻的作息权重（被 @ / 私聊走自己的档）。',
+      fields: [
+        { path: 'enable', type: 'bool', label: '总开关', def: true, desc: '关掉后插件完全不介入，消息全部原样放行。' },
+        { path: 'verbose_log', type: 'bool', label: '每次「已读不回」打日志', def: true, desc: '排障必开：日志里会写明消息是被哪一层丢掉的。' },
+        { path: 'debug_timing', type: 'bool', label: '延迟埋点（时序日志）', def: false, desc: '把每条被处理消息的时序（平台发出 → 开始处理 → 判定 → 进入发送 → 延时结束）写进 plugin_data/life/timing.jsonl，用来定位「放行之后到真正发送」之间的滞后。默认关闭，开了才会写文件。' },
+        { path: 'base_probability.chime', type: 'number', label: '群聊插话基础概率', def: 0.03, min: 0, max: 1, step: 0.01, desc: '没 @ 它时的开口概率。真机实测 0.1 在活跃群里太吵。' },
+        { path: 'base_probability.proactive', type: 'number', label: '主动开口基础概率（闸门档，当前备用）', def: 0.3, min: 0, max: 1, step: 0.01, desc: '没人问它、它自己想说话时用这一档。主动开口目前走下面「主动开口」组的可打扰度概率表，这里的基础概率暂不参与；保留是为了闸门语义完整。' },
+        { path: 'base_probability.addressed', type: 'number', label: '被 @ / 私聊基础概率', def: 1.0, min: 0, max: 1, step: 0.01, locked: true, desc: '恒为 1.0，不参与乘法，只用于延迟计算；睡眠时段走排队补发。' },
+      ]
+    },
+    {
+      title: '连丢、范围与名单',
+      desc: '防止「连发三条一条都不回」，并限定插件对哪些会话、哪些发送者生效。',
+      fields: [
+        { path: 'consecutive_drop_limit', type: 'number', label: '同一发送者最多连续被丢', def: 3, min: 0, max: 99, step: 1, unit: '条', desc: '防止「连发三条一条都不回」。0 = 关闭该保护。' },
+        { path: 'consecutive_drop_scope', type: 'select', label: '连丢计数范围', def: 'sender', options: [['sender', '按发送者（推荐）'], ['session', '按会话（整群共用）']], desc: '按发送者：群里很多人各说一句不会误触发；按会话：容易让机器人变吵。' },
+        { path: 'silence_list', type: 'textarea', label: '静默名单', def: [], rows: 3, placeholder: '一行一个 QQ 号，也可用逗号分隔', desc: '名单内发送者的消息直接已读不回，不进 LLM（不花 token）。' },
+        { path: 'session_whitelist', type: 'textarea', label: '会话白名单（umo）', def: [], rows: 3, placeholder: '留空 = 对所有会话生效', desc: '只对这些 unified_msg_origin 生效，方便先在测试群里试。' },
+      ]
+    },
+    {
+      title: '被点名分档',
+      desc: '被 @ 或私聊时，按当前活跃度决定「立刻回」还是「攒一波统一回」。',
+      fields: [
+        { path: 'addressed_max_age_seconds', type: 'number', label: '被点名消息时效上限（秒）', def: 180, min: 0, max: 86400, step: 1, unit: '秒', clamp: true, desc: '被 @ / 私聊 的消息如果轮到时已经过去超过这个秒数，就直接不回（0 = 关闭）。防止机器人被长上下文拖住后，把几十分钟前的旧消息翻出来重答。' },
+        { path: 'addressed_reply.enable', type: 'bool', label: '启用分档', def: true, desc: '关掉就永远立刻回。' },
+        { path: 'addressed_reply.immediate_threshold', type: 'number', label: '立刻回复的活跃度阈值', def: 0.6, min: 0, max: 1, step: 0.05, desc: '活跃度 ≥ 此值：立刻回。低于此值：攒一个窗口再统一回一次。' },
+        { path: 'addressed_reply.batch_window_seconds', type: 'number', label: '攒消息窗口', def: 120, min: 0, max: 3600, step: 1, unit: '秒', desc: '低活跃度时攒多久统一回。窗口内后到的消息并进同一次回复，不额外花 token。' },
+        { path: 'addressed_reply.batch_max_messages', type: 'number', label: '一次最多合并', def: 10, min: 1, max: 100, step: 1, unit: '条', desc: '超出的只保留最新的，旧的标明还有几条没看。' },
+      ]
+    },
+    {
+      title: '回复延迟',
+      desc: '替代 0.5 秒秒回，让它像个活人而不是接口。',
+      fields: [
+        { path: 'reply_delay.enable', type: 'bool', label: '启用回复延迟', def: true },
+        { path: 'reply_delay.min_seconds', type: 'number', label: '最小延迟', def: 1, min: 0, max: 600, step: 0.5, unit: '秒' },
+        { path: 'reply_delay.max_seconds', type: 'number', label: '最大延迟', def: 8, min: 0, max: 600, step: 0.5, unit: '秒', desc: '原来的默认 30 太夸张，真机实测后改成 8。' },
+        { path: 'reply_delay.activity_penalty', type: 'number', label: '低活跃度额外延迟系数', def: 0.35, min: 0, max: 2, step: 0.05, desc: '额外延迟 = (1 − 活跃度) × (max − min) × 本系数。0 = 延迟与活跃度无关。' },
+        { path: 'reply_delay.sleep_extra_seconds', type: 'number', label: '睡眠时段额外延迟', def: 20, min: 0, max: 600, step: 1, unit: '秒' }
+      ]
+    },
+    {
+      title: '会话冷却',
+      desc: '同一会话短时间内已经回过 N 次，就暂时已读不回（防刷屏兜底）。',
+      fields: [
+        { path: 'session_cooldown.enable', type: 'bool', label: '会话冷却', def: true, desc: '启用后，同一会话短时间内已回过 N 次就暂时已读不回（防刷屏兜底）。' },
+        { path: 'session_cooldown.window_seconds', type: 'number', label: '冷却窗口', def: 60, min: 1, max: 3600, step: 1, unit: '秒' },
+        { path: 'session_cooldown.max_replies', type: 'number', label: '窗口内最多回', def: 3, min: 1, max: 50, step: 1, unit: '条' },
+        { path: 'session_cooldown.exempt_addressed', type: 'bool', label: '被点名时豁免冷却', def: true, desc: '不建议关：关了会在对方连问时变哑巴。' }
+      ]
+    },
+    {
+      title: '睡眠队列',
+      desc: '睡眠时段（权重 0）来的消息不丢，排队到早上补发。',
+      fields: [
+        { path: 'sleep_queue.enable', type: 'bool', label: '启用排队补发', def: true },
+        { path: 'sleep_queue.flush_at_hour', type: 'number', label: '起床补发整点', def: 8, min: 0, max: 23, step: 1, unit: '点' },
+        { path: 'sleep_queue.only_addressed', type: 'bool', label: '只补发被点名的', def: true, desc: '群聊闲聊直接丢，避免早上倒垃圾。' },
+        { path: 'sleep_queue.max_per_session', type: 'number', label: '每会话最多留', def: 5, min: 1, max: 50, step: 1, unit: '条', desc: '半夜连发十条不会早上全部重放，只留最新的。' }
+      ]
+    },
+    {
+      title: '循环熔断',
+      desc: '两个 bot 互相回复会疯狂烧 token；检测到 ID 交替发言就静默一会儿。',
+      fields: [
+        { path: 'loop_breaker.enable', type: 'bool', label: '启用循环熔断', def: true },
+        { path: 'loop_breaker.alternate_rounds', type: 'number', label: '判定交替轮数', def: 4, min: 2, max: 50, step: 1, unit: '轮' },
+        { path: 'loop_breaker.silence_minutes', type: 'number', label: '熔断后静默', def: 30, min: 1, max: 1440, step: 1, unit: '分钟' },
+        { path: 'loop_breaker.exempt_addressed', type: 'bool', label: '被点名豁免熔断', def: true, desc: '避免真人在 @ 时变哑巴。' }
+      ]
+    },
+    {
+      title: '主动开口',
+      desc: '机器人自己找话题说话。默认关闭；填了白名单才会生效，且睡眠时段绝不开口（作息表说了算）。',
+      fields: [
+        { path: 'proactive.enable', type: 'bool', label: '启用主动开口', def: false, desc: '★默认关闭：还要在下面填白名单才会真正生效。关着的时候其它项照样可以先配好，打开即生效。' },
+        { path: 'proactive.session_list', type: 'textarea', label: '主动开口白名单（umo / 群号 / QQ 号）', def: [], rows: 4, placeholder: '一行一个会话，例如 aiocqhttp:GroupMessage:123456，或直接写群号 / QQ 号', desc: '只对这些会话主动开口。支持完整 unified_msg_origin，也可以直接填群号 / QQ 号；留空 = 不开启（保守）。一行一个，也可用逗号分隔。' },
+        { path: 'proactive.timeline', type: 'text', label: '可打扰度时间线', def: '0-8=blocked,8-10=low,10-12=normal,12-14=normal,14-19=low,19-23=high,23-24=low', rows: 3, placeholder: '起始-结束=档位，逗号或换行分隔；档位取 blocked / low / normal / high', desc: '格式 起始-结束=档位，逗号或换行分隔，档位取 blocked / low / normal / high。没写到的时间一律按 blocked（请勿打扰）处理。' },
+        { path: 'proactive.probability.blocked', type: 'number', label: '请勿打扰档概率', def: 0, min: 0, max: 1, step: 0.05, desc: '默认 0 = 硬闸门。调大于 0 才会让 blocked 时段重新参与掷骰子。' },
+        { path: 'proactive.probability.low', type: 'number', label: '低可打扰档概率', def: 0.25, min: 0, max: 1, step: 0.05 },
+        { path: 'proactive.probability.normal', type: 'number', label: '正常可打扰档概率', def: 0.7, min: 0, max: 1, step: 0.05 },
+        { path: 'proactive.probability.high', type: 'number', label: '高可打扰档概率', def: 1, min: 0, max: 1, step: 0.05, desc: '实际开口概率 = 档位概率 × 当前时段活跃度（作息表），所以活跃度 0 时永远不会主动。' },
+        { path: 'proactive.min_idle_minutes', type: 'number', label: '至少安静这么久才可能开口', def: 30, min: 0, max: 1440, step: 1, unit: '分钟', desc: '距上次收到用户消息至少空闲这么久才考虑主动。0 = 不限制。' },
+        { path: 'proactive.cooldown_minutes', type: 'number', label: '同一会话两次主动的最小间隔', def: 45, min: 0, max: 1440, step: 1, unit: '分钟' },
+        { path: 'proactive.daily_budget', type: 'number', label: '每会话每天最多主动', def: 3, min: 0, max: 100, step: 1, unit: '条', desc: '0 = 一条都不发。' },
+        { path: 'proactive.max_unanswered', type: 'number', label: '连续几条没回复就停手', def: 2, min: 0, max: 100, step: 1, unit: '条', desc: '连续主动未获回复达到此数就停手，收到用户消息即清零。0 = 不限制。' },
+        { path: 'proactive.jitter_minutes', type: 'number', label: '开口时刻抖动半径', def: 12, min: 0, max: 180, step: 1, unit: '分钟', desc: '真人不会准点，开口时刻在这个范围内随机浮动。' },
+        { path: 'proactive.check_interval_seconds', type: 'number', label: '后台检查频率', def: 60, min: 5, max: 3600, step: 1, unit: '秒', desc: '最小 5 秒，避免忙等。' },
+        { path: 'proactive.llm_timeout_seconds', type: 'number', label: '单次生成超时', def: 45, min: 1, max: 600, step: 1, unit: '秒', desc: 'provider 卡住时的硬超时；超时就放弃本次，绝不阻塞后台循环。' },
+        { path: 'proactive.system_prompt', type: 'text', label: '额外人设提示（可选）', def: '', rows: 3, placeholder: '留空 = 用 AstrBot 的默认人设', desc: '主动开口时额外追加的人设提示。留空 = 用 AstrBot 的默认人设。' },
+        { path: 'proactive.prompt_template', type: 'text', label: '主动开口提示词模板', def: '（现在没什么事，想主动找 Ta 说句话。可以参考最近的聊天，但不要复述。）', rows: 3, desc: '生成主动内容时用的提示模板。' }
+      ]
+    },
+    {
+      title: '分段与打字节奏',
+      desc: '按「阅读 + 打字」时间模型把一条回复拆成几段发出来，间隔按字数算，更像真人在打字。默认关闭。',
+      fields: [
+        { path: 'segmented_jitter.enable', type: 'bool', label: '启用「阅读+打字」时间模型', def: false, desc: '★默认关闭。开启时建议把 AstrBot 内置的分段回复关掉，否则两套分段会叠加。' },
+        { path: 'segmented_jitter.typing_chars_per_second', type: 'number', label: '打字速度', def: 3.5, min: 0.5, max: 20, step: 0.5, unit: '字/秒', desc: '字/秒，人约 2~5。' },
+        { path: 'segmented_jitter.reading_chars_per_second', type: 'number', label: '阅读速度', def: 12, min: 1, max: 50, step: 0.5, unit: '字/秒', desc: '字/秒，人约 8~15。' },
+        { path: 'segmented_jitter.pre_min_seconds', type: 'number', label: '第一条之前的下限', def: 0.8, min: 0, max: 600, step: 0.1, unit: '秒' },
+        { path: 'segmented_jitter.pre_max_seconds', type: 'number', label: '第一条之前的上限', def: 15, min: 0, max: 600, step: 0.1, unit: '秒', desc: '打字时间到顶后不再增长。' },
+        { path: 'segmented_jitter.min_seconds', type: 'number', label: '段间下限', def: 0.6, min: 0, max: 600, step: 0.1, unit: '秒' },
+        { path: 'segmented_jitter.max_seconds', type: 'number', label: '段间上限', def: 3, min: 0, max: 600, step: 0.1, unit: '秒' },
+        { path: 'segmented_jitter.jitter', type: 'number', label: '抖动比例', def: 0.25, min: 0, max: 1, step: 0.05, desc: '实际时长 = 基准 × uniform(1−j, 1+j)。' },
+        { path: 'segmented_jitter.max_segments', type: 'number', label: '最多切几段', def: 4, min: 1, max: 50, step: 1, unit: '段', desc: '超出的并进最后一段。' },
+        { path: 'segmented_jitter.max_total_seconds', type: 'number', label: '整条回复总耗时上限', def: 30, min: 0, max: 3600, step: 1, unit: '秒', desc: '超了等比压缩，每段有保底。' },
+        { path: 'segmented_jitter.split_mode', type: 'select', label: '切分方式', def: 'regex', options: [['regex', 'regex：用正则匹配切段（默认）'], ['chars', 'chars：按切分字符表切']], desc: 'regex = 用正则匹配切段（默认，与 AstrBot 内置语义一致，换行天然成段）；chars = 按下面的切分字符表切。' },
+        { path: 'segmented_jitter.regex', type: 'text', label: '切分正则（仅 regex 模式生效）', def: '[^\\n]*?[。！？!?…；;]+|[^\\n]+', rows: 2, desc: '匹配到的片段即为段；写坏会自动退回 chars 模式并只警告一次。默认值比内置多收 !? ；; 等标点。' },
+        { path: 'segmented_jitter.split_chars', type: 'text', label: '在这些字符后切分', def: '。！？!?\n…；;', rows: 2, desc: '在这些字符后切分，标点保留。仅 chars 模式生效；换行（\\n / \\r\\n / \\r）永远是硬边界，与这里填什么无关。' },
+        { path: 'segmented_jitter.min_segment_chars', type: 'number', label: '太短的段合并进相邻段', def: 6, min: 0, max: 200, step: 1, unit: '字', desc: '仅 chars 模式生效；换行切出来的段豁免合并（哪怕只有 1 个字）。' },
+        { path: 'segmented_jitter.count_incoming_chars', type: 'bool', label: '阅读时间计入对方字数', def: true, desc: '把你发来的消息字数也算进阅读时间。' }
+      ]
+    },
+    {
+      title: '正在输入状态',
+      desc: '先亮「正在输入…」，过一会儿再把内容发出去。默认关闭。',
+      fields: [
+        { path: 'typing_indicator.enable', type: 'bool', label: '启用「正在输入」状态', def: false, desc: '★默认关闭。' },
+        { path: 'typing_indicator.refresh_seconds', type: 'number', label: '续期间隔', def: 4, min: 1, max: 300, step: 0.5, unit: '秒', desc: '「正在输入」状态会过期，需要定时续。' },
+        { path: 'typing_indicator.private', type: 'bool', label: '私聊发送「正在输入」', def: true },
+        { path: 'typing_indicator.group', type: 'bool', label: '群聊发送「正在输入」', def: false, desc: '⚠️ NapCat 不支持群「正在输入」：硬开等于给该群的发言者发一条私聊状态，而不是群状态。' }
+      ]
+    }
+  ];
+
+  var SECTIONS = [
+    { id: 'base', name: '基础闸门', cardIdx: [0, 1] },
+    { id: 'reply', name: '回话策略', cardIdx: [2, 3] },
+    { id: 'anti', name: '防刷与睡眠', cardIdx: [4, 5, 6] },
+    { id: 'proact', name: '主动开口', cardIdx: [7] },
+    { id: 'typing', name: '打字与拟人', cardIdx: [8, 9] }
+  ];
+
+
+  /* ==================== DOM ==================== */
+  var groupsEl = $('#groups');
+  var navEl = $('#navList');
+  var errBar = $('#errBar');
+  var verEl = $('#ver');
+  var dirtyHint = $('#dirtyHint');
+  var btnSave = $('#btnSave');
+  var btnReload = $('#btnReload');
+  var toastEl = $('#toast');
+
+  var ctrls = {};       // path -> { el, f, meta }
+  var server = {};      // 服务器上的配置（嵌套结构）
+  var busy = false;
+  var activePane = 'curve';        // 默认落在折线图（用户反馈「放那么深谁找得到」）
+
+  /* ==================== 取值工具 ==================== */
+  function getPath(obj, path) {
+    var cur = obj;
+    var parts = path.split('.');
+    for (var i = 0; i < parts.length; i++) {
+      if (cur === null || cur === undefined || typeof cur !== 'object') return undefined;
+      cur = cur[parts[i]];
+    }
+    return cur;
+  }
+  function setPath(obj, path, val) {
+    var parts = path.split('.');
+    var cur = obj;
+    for (var i = 0; i < parts.length - 1; i++) {
+      var k = parts[i];
+      if (cur[k] === null || typeof cur[k] !== 'object' || Array.isArray(cur[k])) cur[k] = {};
+      cur = cur[k];
+    }
+    cur[parts[parts.length - 1]] = val;
+  }
+  function listToText(v) {
+    if (Array.isArray(v)) return v.map(function (x) { return String(x); }).join('\n');
+    if (v === null || v === undefined) return '';
+    return String(v);
+  }
+  function textToList(v) {
+    if (Array.isArray(v)) {
+      return v.map(function (x) { return String(x).trim(); }).filter(function (x) { return x.length > 0; });
+    }
+    return String(v === null || v === undefined ? '' : v)
+      .split(/[\s,，;；]+/)
+      .map(function (x) { return x.trim(); })
+      .filter(function (x) { return x.length > 0; });
+  }
+  function fmtValue(f, v) {
+    if (f.type === 'bool') return v ? '开' : '关';
+    if (f.type === 'select') {
+      var hit = (f.options || []).filter(function (o) { return o[0] === String(v == null ? f.def : v); })[0];
+      return hit ? hit[1] : String(v == null ? f.def : v);
+    }
+    if (f.type === 'textarea') {
+      var arr = textToList(v);
+      if (!arr.length) return '空';
+      var shown = arr.slice(0, 6).join('、');
+      return arr.length + ' 项（' + shown + (arr.length > 6 ? '…' : '') + '）';
+    }
+    if (f.type === 'text') {                       // 多行纯文本：整段显示，太长就截断
+      var t = String(v === null || v === undefined ? '' : v).trim();
+      if (!t) return '空';
+      return t.length > 26 ? t.slice(0, 26) + '…' : t;
+    }
+    var n = Number(v);
+    if (!isFinite(n)) n = f.def;
+    return String(n) + (f.unit ? ' ' + f.unit : '');
+  }
+  function normKey(f, v) {
+    if (f.type === 'bool') return v ? '1' : '0';
+    if (f.type === 'number') { var n = Number(v); return isFinite(n) ? String(n) : 'null'; }
+    if (f.type === 'textarea') return JSON.stringify(textToList(v));
+    if (f.type === 'text') return String(v === null || v === undefined ? '' : v).trim();
+    return v === null || v === undefined ? '' : String(v);
+  }
+  function readCtrl(f) {
+    var rec = ctrls[f.path];
+    if (!rec) return undefined;
+    var el = rec.el;
+    if (f.type === 'bool') return !!el.checked;
+    if (f.type === 'number') {
+      var n = parseFloat(el.value);
+      if (!isFinite(n)) return null;
+      if (f.clamp) {                       // 负数/越界一律钳到边界，绝不把非法值发给后端
+        if (f.min !== undefined) n = Math.max(f.min, n);
+        if (f.max !== undefined) n = Math.min(f.max, n);
+      }
+      return n;
+    }
+    if (f.type === 'textarea') return textToList(el.value);
+    if (f.type === 'text') return String(el.value).trim();   // 多行纯文本按整段字符串提交，只去掉首尾空白
+    return el.value;
+  }
+
+  // 数值字段的输入体检（只对声明了 clamp 的字段提示，避免其它字段被噪声徽标刷屏）
+  function numberIssue(f) {
+    if (f.type !== 'number' || !f.clamp) return '';
+    var rec = ctrls[f.path];
+    if (!rec) return '';
+    var raw = String(rec.el.value).trim();
+    if (raw === '') return '留空，保存时沿用当前生效值';
+    var n = parseFloat(raw);
+    if (!isFinite(n)) return '不是数字，保存时沿用当前生效值';
+    if (f.min !== undefined && n < f.min) return '小于 ' + f.min + '，保存时将按 ' + f.min + ' 提交';
+    if (f.max !== undefined && n > f.max) return '大于 ' + f.max + '，保存时将按 ' + f.max + ' 提交';
+    return '';
+  }
+
+  /* ==================== 渲染 ==================== */
+  function buildField(f, secId) {
+    var wrap = document.createElement('div');
+    wrap.className = 'field';
+    if (f.type === 'textarea' || f.type === 'text') wrap.className += ' wide';   // 名单/长文本整行铺开，方便粘贴一堆 QQ 号、umo 或长提示词
+
+    var top = document.createElement('div');
+    top.className = 'ftop';
+
+    var label = document.createElement('div');
+    label.className = 'flabel';
+    label.textContent = f.label;
+    if (f.locked) label.classList.add('locked');
+
+    var ctlWrap = document.createElement('div');
+    ctlWrap.className = 'fctl';
+
+    var el;
+    if (f.type === 'bool') {
+      var sw = document.createElement('label');
+      sw.className = 'switch';
+      el = document.createElement('input');
+      el.type = 'checkbox';
+      var track = document.createElement('span');
+      track.className = 'track';
+      sw.appendChild(el);
+      sw.appendChild(track);
+      ctlWrap.appendChild(sw);
+    } else if (f.type === 'select') {
+      el = document.createElement('select');
+      (f.options || []).forEach(function (o) {
+        var opt = document.createElement('option');
+        opt.value = o[0];
+        opt.textContent = o[1];
+        el.appendChild(opt);
+      });
+      ctlWrap.appendChild(el);
+    } else if (f.type === 'textarea' || f.type === 'text') {
+      // textarea = 名单（切分成数组）；text = 多行纯文本（整段字符串，不切分）
+      el = document.createElement('textarea');
+      el.rows = f.rows || (f.type === 'text' ? 2 : 3);
+      if (f.placeholder) el.placeholder = f.placeholder;
+      ctlWrap.appendChild(el);
+    } else {
+      el = document.createElement('input');
+      el.type = 'number';
+      if (f.min !== undefined) el.min = f.min;
+      if (f.max !== undefined) el.max = f.max;
+      el.step = f.step !== undefined ? f.step : 1;
+      ctlWrap.appendChild(el);
+      if (f.unit) {
+        var unit = document.createElement('span');
+        unit.className = 'unit';
+        unit.textContent = f.unit;
+        ctlWrap.appendChild(unit);
+      }
+    }
+
+    el.id = 'f_' + secId + '__' + f.path.replace(/\./g, '_');   // 带板块前缀，避免跨板块 id 串台
+    if (f.locked) {
+      el.disabled = true;
+      el.title = '该项固定为 ' + f.def + '，不可编辑';
+    }
+    el.addEventListener('input', onAnyInput);
+    el.addEventListener('change', onAnyInput);
+
+    top.appendChild(label);
+    top.appendChild(ctlWrap);
+    wrap.appendChild(top);
+
+    if (f.desc) {
+      var d = document.createElement('div');
+      d.className = 'fdesc';
+      d.textContent = f.desc;
+      wrap.appendChild(d);
+    }
+    var meta = document.createElement('div');
+    meta.className = 'fmeta';
+    wrap.appendChild(meta);
+
+    ctrls[f.path] = { el: el, f: f, meta: meta };
+    return wrap;
+  }
+
+  function buildCard(g, secId) {
+    var card = document.createElement('section');
+    card.className = 'card';
+    var h = document.createElement('h2');
+    h.textContent = g.title;
+    var d = document.createElement('p');
+    d.className = 'gdesc';
+    d.textContent = g.desc;
+    card.appendChild(h);
+    card.appendChild(d);
+    g.fields.forEach(function (f) { card.appendChild(buildField(f, secId)); });
+    return card;
+  }
+
+  // 5 个板块的表单一次性全部渲染进 DOM，切 tab 只切 display —— 所以切走再切回不会丢未保存的修改，
+  // 保存时也自然是「按全部板块取值」。
+  function buildForm() {
+    groupsEl.innerHTML = '';
+    ctrls = {};
+    SECTIONS.forEach(function (sec) {
+      var panel = document.createElement('section');
+      panel.className = 'pane';
+      panel.setAttribute('data-pane', sec.id);
+      panel.setAttribute('role', 'tabpanel');
+      sec.cardIdx.forEach(function (i) { panel.appendChild(buildCard(CARDS[i], sec.id)); });
+      groupsEl.appendChild(panel);
+    });
+  }
+
+  function applyValues() {
+    Object.keys(ctrls).forEach(function (path) {
+      var rec = ctrls[path];
+      var f = rec.f;
+      var el = rec.el;
+      var v = getPath(server, path);
+      if (f.type === 'bool') {
+        el.checked = (v === undefined || v === null) ? !!f.def : !!v;
+      } else if (f.type === 'select') {
+        el.value = (v === undefined || v === null) ? String(f.def) : String(v);
+        if (!el.value) el.value = String(f.def);
+      } else if (f.type === 'textarea') {
+        el.value = listToText(v);
+      } else if (f.type === 'text') {
+        el.value = (v === undefined || v === null) ? String(f.def) : String(v);
+      } else {
+        el.value = String(numOr(v, f.def));
+      }
+    });
+    refreshMeta();
+  }
+
+  function refreshField(path) {
+    var rec = ctrls[path];
+    if (!rec) return;
+    var f = rec.f;
+    var serverVal = getPath(server, path);
+    var defVal = f.def;
+    var curVal = readCtrl(f);
+    if (f.clamp && curVal === null) curVal = numOr(getPath(server, path), f.def);   // 留空/非法时实际会提交当前生效值
+
+    var changed = normKey(f, serverVal) !== normKey(f, defVal);
+    var unsaved = normKey(f, curVal) !== normKey(f, serverVal);
+    var html = '当前生效值 <b>' + esc(fmtValue(f, serverVal)) + '</b>';
+    html += ' · 默认值 <b>' + esc(fmtValue(f, defVal)) + '</b>';
+    if (changed) html += '<span class="badge">已被你改过</span>';
+    else html += '<span class="badge def">与默认一致</span>';
+    if (unsaved) html += '<span class="badge warn">未保存的修改：' + esc(fmtValue(f, curVal)) + '</span>';
+    var issue = numberIssue(f);
+    if (issue) html += '<span class="badge warn">' + esc(issue) + '</span>';
+    rec.meta.innerHTML = html;
+    if (rec.el.tagName === 'INPUT') rec.el.classList.toggle('inval', !!issue);
+  }
+
+  function refreshMeta() {
+    Object.keys(ctrls).forEach(refreshField);
+    updateDirtyUI();
+  }
+
+  function fieldDirty() {
+    return Object.keys(ctrls).some(function (path) {
+      var rec = ctrls[path];
+      return normKey(rec.f, readCtrl(rec.f)) !== normKey(rec.f, getPath(server, path));
+    });
+  }
+
+  // 整页脏 = 表单字段脏 或 折线图脏（折线图自己维护基线）
+  function isDirty() { return fieldDirty() || !!(window.LifeChart && LifeChart.isDirty && LifeChart.isDirty()); }
+
+  function updateDirtyUI() {
+    var dirty = isDirty();
+    btnSave.disabled = !dirty || busy;
+    btnSave.classList.toggle('dirty', dirty && !busy);
+    dirtyHint.textContent = dirty ? '有未保存的修改' : '没有未保存的修改';
+    dirtyHint.classList.toggle('on', dirty);
+    // 哪个板块有未保存的修改，就在它的左侧菜单项上点一颗小黄点（折线图那项问 LifeChart）
+    Array.prototype.forEach.call(navEl.querySelectorAll('.nav-item'), function (b) {
+      b.classList.toggle('dirty', paneDirty(b.getAttribute('data-pane')));
+    });
+  }
+
+  function onAnyInput() {
+    Object.keys(ctrls).forEach(refreshField);
+    updateDirtyUI();
+  }
+
+  /* ==================== 页内左侧菜单（形态照 steam_status_monitor_V3） ==================== */
+  var NAV_ICONS = {
+    curve: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 17 8 9 12 14 21 4"/><line x1="3" y1="21" x2="21" y2="21"/></svg>',
+    base: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2"/><circle cx="15" cy="12" r="2"/><circle cx="7" cy="18" r="2"/></svg>',
+    reply: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8 8 0 0 1-8 8H8l-5 3 1.5-5A8 8 0 1 1 21 12z"/></svg>',
+    anti: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v6c0 5-3 8-7 9-4-1-7-4-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg>',
+    proact: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6M10 21h4"/><path d="M12 3a6 6 0 0 0-3 11v1h6v-1a6 6 0 0 0-3-11z"/></svg>',
+    typing: '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M8 14h8"/></svg>'
+  };
+  var NAV_ITEMS = [{ id: 'curve', name: '作息活跃度' }].concat(SECTIONS.map(function (s) { return { id: s.id, name: s.name }; }));
+
+  function buildNav() {
+    navEl.innerHTML = '';
+    NAV_ITEMS.forEach(function (item) {
+      var li = document.createElement('li');
+      li.className = 'nav-item';
+      li.setAttribute('role', 'tab');
+      li.setAttribute('data-pane', item.id);
+      li.innerHTML = (NAV_ICONS[item.id] || '') + '<span class="nav-label"></span><span class="nav-dot"></span>';
+      li.querySelector('.nav-label').textContent = item.name;
+      li.addEventListener('click', function () { showPane(item.id); });
+      navEl.appendChild(li);
+    });
+  }
+
+  function paneDirty(id) {
+    if (id === 'curve') return !!(window.LifeChart && LifeChart.isDirty && LifeChart.isDirty());
+    var sec = SECTIONS.filter(function (s) { return s.id === id; })[0];
+    return !!sec && sectionDirty(sec);
+  }
+
+  function showPane(id) {
+    activePane = id;
+    Array.prototype.forEach.call(document.querySelectorAll('.pane'), function (p) {
+      p.classList.toggle('active', p.getAttribute('data-pane') === id);
+    });
+    Array.prototype.forEach.call(navEl.querySelectorAll('.nav-item'), function (b) {
+      var on = b.getAttribute('data-pane') === id;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    if (id === 'curve' && window.LifeChart) {
+      // 折线图必须等面板可见后再初始化/重算：display:none 期间量出来是 0。
+      // 这里同步调用：class 刚切完，读 clientWidth 会强制重排，拿到的就是真实宽度。
+      // 不能只靠 requestAnimationFrame —— 后台标签页 / 无合成帧时 rAF 会被饿死，图表就一直不初始化。
+      LifeChart.ensure();
+      setTimeout(function () { if (activePane === 'curve') LifeChart.remeasure(); }, 60);
+    }
+    updateDirtyUI();
+  }
+
+  function sectionKeys(sec) {
+    var keys = [];
+    sec.cardIdx.forEach(function (i) {
+      CARDS[i].fields.forEach(function (f) { keys.push(f.path); });
+    });
+    return keys;
+  }
+
+  function sectionDirty(sec) {
+    return sectionKeys(sec).some(function (path) {
+      var rec = ctrls[path];
+      if (!rec) return false;
+      return normKey(rec.f, readCtrl(rec.f)) !== normKey(rec.f, getPath(server, path));
+    });
+  }
+
+  /* ==================== 提交（整页 71 个叶子键） ==================== */
+  function buildPayload() {
+    var out = {};
+    // schema 的 71 个叶子键：67 个表单字段 + 折线图那 4 个（time_weights / interpolate_minutes /
+    // weekend_multiplier / weekend_sleep_shift_hours，由 LifeChart.collect() 提供）。
+    Object.keys(ctrls).forEach(function (path) {
+      var f = ctrls[path].f;
+      var v = readCtrl(f);
+      if (f.locked) v = f.def;
+      else if (f.type === 'number' && v === null) v = numOr(getPath(server, path), f.def);
+      setPath(out, path, v);
+    });
+    if (window.LifeChart && LifeChart.collect) {
+      var c = LifeChart.collect();
+      setPath(out, 'time_weights', c.time_weights);
+      setPath(out, 'interpolate_minutes', c.interpolate_minutes);
+      setPath(out, 'weekend_multiplier', c.weekend_multiplier);
+      setPath(out, 'weekend_sleep_shift_hours', c.weekend_sleep_shift_hours);
+    }
+    return out;
+  }
+
+  function requireBridge() {
+    if (!bridge || typeof bridge.apiPost !== 'function') {
+      throw new Error('未检测到 AstrBot 页面桥接（window.AstrBotPluginPage），无法调用后端');
+    }
+  }
+
+  async function doSave() {
+    if (busy) return;
+    try {
+      requireBridge();
+    } catch (e) {
+      showError(errMsg(e));
+      return;
+    }
+    busy = true;
+    btnSave.disabled = true;
+    btnSave.textContent = '保存中…';
+    try {
+      var payload = buildPayload();
+      var res = await bridge.apiPost('page/settings', payload);
+      if (res && res.ok === false) throw new Error(res.error || res.message || '后端返回 ok=false');
+      server = (res && res.config) ? res.config : payload;
+      if (window.LifeChart && LifeChart.markSaved) LifeChart.markSaved();   // 这次保存也带上了那 4 个曲线键
+      rebuild();
+      hideError();
+      toast('已保存');
+    } catch (err) {
+      showError('保存失败：' + errMsg(err));
+    } finally {
+      busy = false;
+      btnSave.textContent = '保存';
+      updateDirtyUI();
+    }
+  }
+
+  async function doReload() {
+    if (busy) return;
+    try {
+      requireBridge();
+    } catch (e) {
+      showError(errMsg(e));
+      return;
+    }
+    busy = true;
+    btnReload.disabled = true;
+    try {
+      var res = await bridge.apiGet('page/config', {});
+      if (res && res.ok === false) throw new Error(res.error || res.message || '后端返回 ok=false');
+      server = (res && res.config) ? res.config : {};
+      if (res && res.plugin_version) verEl.textContent = '插件 ' + res.plugin_version;
+      if (window.LifeChart && LifeChart.adopt) LifeChart.adopt(res);
+      rebuild();
+      hideError();
+      toast('已重新载入');
+    } catch (err) {
+      showError('重新载入失败：' + errMsg(err));
+    } finally {
+      busy = false;
+      btnReload.disabled = false;
+      updateDirtyUI();
+    }
+  }
+
+  function rebuild() {
+    buildNav();
+    buildForm();
+    showPane(activePane);
+    applyValues();
+  }
+
+  /* ==================== 杂项 ==================== */
+  function showError(msg) { errBar.hidden = false; errBar.textContent = msg; }
+  function hideError() { errBar.hidden = true; errBar.textContent = ''; }
+
+  var toastTimer = null;
+  function toast(msg) {
+    toastEl.textContent = msg;
+    toastEl.classList.add('show');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 2600);
+  }
+
+  function applyTheme(c) {
+    var dark = !(c && c.isDark === false);
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  }
+
+  async function waitBridge(timeoutMs) {
+    var t0 = Date.now();
+    while (!window.AstrBotPluginPage && (Date.now() - t0) < timeoutMs) {
+      await new Promise(function (r) { setTimeout(r, 100); });
+    }
+    return window.AstrBotPluginPage || null;
+  }
+
+  async function init() {
+    applyTheme(null);
+    if (window.LifeChart) {
+      LifeChart.onChange = updateDirtyUI;          // 折线图一改就刷新全局脏标记与菜单小黄点
+    }
+    btnSave.addEventListener('click', doSave);
+    btnReload.addEventListener('click', doReload);
+    rebuild();                       // 先用默认值渲染，避免白屏
+
+    bridge = await waitBridge(2500);
+    if (!bridge) {
+      showError('未检测到 AstrBot 页面桥接（window.AstrBotPluginPage）——当前显示的是默认值，保存/载入不可用。');
+      return;
+    }
+    try { if (typeof bridge.ready === 'function') await bridge.ready(); } catch (e) { /* 忽略 */ }
+    try {
+      if (typeof bridge.getContext === 'function') applyTheme(bridge.getContext());
+      if (typeof bridge.onContext === 'function') {
+        bridge.onContext(function (c) { applyTheme(c); });
+      }
+    } catch (e) { /* 忽略 */ }
+
+    try {
+      var res = await bridge.apiGet('page/config', {});
+      if (res && res.ok === false) throw new Error(res.error || res.message || '后端返回 ok=false');
+      server = (res && res.config) ? res.config : {};
+      if (res && res.plugin_version) verEl.textContent = '插件 ' + res.plugin_version;
+      if (window.LifeChart && LifeChart.adopt) LifeChart.adopt(res);   // 折线图数据由宿主统一取，避免重复请求
+      hideError();
+      rebuild();
+    } catch (err) {
+      showError('读取配置失败：' + errMsg(err));
+    }
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>
