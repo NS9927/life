@@ -146,6 +146,7 @@ def install() -> FakeLogger:
     filter_mod.EventMessageType = FakeEventMessageType
     filter_mod.event_message_type = _passthrough_decorator
     filter_mod.on_decorating_result = _passthrough_decorator
+    filter_mod.after_message_sent = _passthrough_decorator
     filter_mod.platform_adapter_type = _passthrough_decorator
     filter_mod.command = _passthrough_decorator
 

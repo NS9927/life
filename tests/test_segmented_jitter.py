@@ -742,6 +742,13 @@ class FakeEvent:
         self._result = FakeResult(chain if chain is not None else [FakePlain("嗯。")]) if result else None
         self.message_obj = FakeMsgObj(message=incoming, message_str=incoming_str)
         self.bot = bot
+        self.extras: dict = {}
+
+    def set_extra(self, key, value) -> None:
+        self.extras[key] = value
+
+    def get_extra(self, key, default=None):
+        return self.extras.get(key, default)
 
     def get_sender_id(self):
         return self._sender
@@ -783,7 +790,8 @@ class FakeBot:
 class FakeContext:
     def __init__(self, *, fail_send_at=None) -> None:
         self.sent: list[tuple[str, object]] = []
-        self.fail_send_at = fail_send_at
+        self.fail_send_at = fail_send_at  # 第 N 次调用失败（0-based），**只失败一次**
+        self.attempts = 0
 
     def register_web_api(self, *a, **k) -> None:
         pass
@@ -792,7 +800,10 @@ class FakeContext:
         return {}
 
     async def send_message(self, session, message_chain) -> bool:
-        if self.fail_send_at is not None and len(self.sent) == self.fail_send_at:
+        index = self.attempts
+        self.attempts += 1
+        if self.fail_send_at is not None and index == self.fail_send_at:
+            self.fail_send_at = None  # 只炸一次，后面的调用要能成功
             raise RuntimeError("发送挂了")
         self.sent.append((session, message_chain))
         return True
@@ -872,6 +883,15 @@ class WiringBase(unittest.IsolatedAsyncioTestCase):
 
 
 TEXT = "今天天气不错。你吃饭了吗？我还没吃！"
+SEGMENTS = ["今天天气不错。", "你吃饭了吗？", "我还没吃！"]
+
+
+async def fire_sent(plugin, event):
+    """模拟流水线：第一条（result 里那段）已发出 → after_message_sent 唤醒 → 等补发跑完。"""
+    await plugin.after_message_sent(event)
+    tasks = list(plugin._followup_tasks)
+    if tasks:
+        await asyncio.gather(*tasks)
 
 
 class TestWiringZeroSideEffects(WiringBase):
@@ -905,16 +925,28 @@ class TestWiringZeroSideEffects(WiringBase):
         self.assertEqual(event.get_result().chain[0].text, TEXT)
 
     async def test_enabled_but_single_segment_is_left_alone(self):
-        plugin = self.build(segmented_jitter=jitter_conf())
-        event = FakeEvent(chain=[FakePlain("嗯。")])
-        await plugin.apply_reply_delay(event)
+        # 单段：不动 chain（对象都不换）、不注册后续段；pre_delay 照常生效
+        plugin = self.build(
+            segmented_jitter=jitter_conf(min_segment_chars=0, pre_min_seconds=0.3, pre_max_seconds=0.3)
+        )
+        original = FakePlain("嗯。")
+        event = FakeEvent(chain=[original])
+        with fast_sleep([]) as sleeps:
+            await plugin.apply_reply_delay(event)
         self.assertEqual(self.ctx.sent, [])
-        self.assertEqual(event.get_result().chain[0].text, "嗯。")
-        self.assertEqual(plugin._gate.session(UMO).reply_times.__len__(), 1)  # 冷却照记
+        self.assertIs(event.get_result().chain[0], original, "单段时 chain 一个字节都不动")
+        self.assertEqual(len(event.get_result().chain), 1)
+        self.assertEqual(plugin._followup_tasks, set(), "单段不注册后续段")
+        self.assertEqual(len(sleeps), 1, "只有 pre_delay，没有段间隔")
+        self.assertAlmostEqual(sleeps[0], 0.3)
+        self.assertEqual(len(plugin._gate.session(UMO).reply_times), 1)  # 冷却照记
 
 
 class TestWiringSplitAndSend(WiringBase):
-    async def test_first_segments_sent_last_one_stays_in_result(self):
+    """方案 B：**第一段留在 result 里走流水线**（只有它会被加上引用/@），其余段在
+    ``after_message_sent`` 之后按抖动间隔补发。"""
+
+    async def test_first_segment_stays_in_result_rest_after_sent_hook(self):
         plugin = self.build(
             segmented_jitter=jitter_conf(
                 min_segment_chars=0,
@@ -928,18 +960,43 @@ class TestWiringSplitAndSend(WiringBase):
         with fast_sleep([]) as sleeps:
             await plugin.apply_reply_delay(event)
 
+            # 第一条还没发：result 里只有第一段，我们一条都还没发出去
+            self.assertEqual(event.get_result().chain[0].text, SEGMENTS[0])
+            self.assertEqual(len(event.get_result().chain), 1)
+            self.assertEqual(self.ctx.sent, [], "第一条必须走流水线，我们不发它")
+            self.assertEqual(len(plugin._followup_tasks), 1, "应该登记了后续段补发任务")
+
+            # 流水线发出第一条 → 钩子唤醒 → 其余段补发
+            await fire_sent(plugin, event)
+
         sent_texts = [chain.chain[0].text for _, chain in self.ctx.sent]
-        self.assertEqual(sent_texts, ["今天天气不错。", "你吃饭了吗？"])
-        self.assertEqual(event.get_result().chain[0].text, "我还没吃！", "最后一段留给流水线")
-        # 3 段 → 1 个 pre_delay + 2 个段间隔
+        self.assertEqual(sent_texts, SEGMENTS[1:], "后续段按顺序补发")
+        # sleep 序列：pre_delay（钩子内，第一条之前）+ 2 个段间隔（补发任务里）
         self.assertEqual(len(sleeps), 3)
         self.assertAlmostEqual(sleeps[0], 0.4)
         self.assertAlmostEqual(sleeps[1], 0.5)
         self.assertAlmostEqual(sleeps[2], 0.5)
-        # 全部内容恰好出现一次（前两段发出 + 最后一段留 result）
-        self.assertEqual("".join(sent_texts) + event.get_result().chain[0].text, TEXT)
+        # ★不重不漏：第一段（result）+ 后续已发段 == 原文全部段
+        self.assertEqual(
+            [event.get_result().chain[0].text] + sent_texts, SEGMENTS
+        )
 
-    async def test_segment_gaps_slept_after_each_sent_segment(self):
+    async def test_we_never_build_reply_or_at_components(self):
+        """引用/@ 由流水线与 at_inline 加，我们不自己拼——第一条本来就不带它们。"""
+        plugin = self.build(segmented_jitter=jitter_conf(min_segment_chars=0))
+        event = FakeEvent(chain=[FakePlain(TEXT)])
+        with fast_sleep([]):
+            await plugin.apply_reply_delay(event)
+            chain = event.get_result().chain
+            self.assertEqual(len(chain), 1)
+            self.assertIsInstance(chain[0], FakePlain, "链里只有 Plain，没有 Reply/At")
+            self.assertEqual(chain[0].text, SEGMENTS[0])
+            await fire_sent(plugin, event)
+        # 后续段同样只有 Plain
+        for _, sent_chain in self.ctx.sent:
+            self.assertTrue(all(isinstance(c, FakePlain) for c in sent_chain.chain))
+
+    async def test_segment_gaps_use_previous_segment_length(self):
         plugin = self.build(
             segmented_jitter=jitter_conf(
                 min_segment_chars=0,
@@ -949,12 +1006,13 @@ class TestWiringSplitAndSend(WiringBase):
                 pre_max_seconds=100.0,
                 min_seconds=0.0,
                 max_seconds=100.0,
-                max_total_seconds=0.0,  # 关掉总上限，先验原始模型（上限单测另见 test_total_cap_scales_down）
+                max_total_seconds=0.0,  # 关掉总上限，先验原始模型
             )
         )
         event = FakeEvent(chain=[FakePlain(TEXT)], incoming=[FakePlain("在吗")])
         with fast_sleep([]) as sleeps:
             await plugin.apply_reply_delay(event)
+            await fire_sent(plugin, event)
         # 入站 2 字 /1 = 2s 阅读；回复 18 字 /1 = 18s 打字 → pre_delay 20s
         # 段间 = 上一段字数 /1：7 字 → 7s；6 字 → 6s
         self.assertEqual(len(sleeps), 3)
@@ -980,22 +1038,18 @@ class TestWiringSplitAndSend(WiringBase):
         event = FakeEvent(chain=[FakePlain(TEXT)], incoming=[FakePlain("在吗")])
         with fast_sleep([]) as sleeps:
             await plugin.apply_reply_delay(event)
+            await fire_sent(plugin, event)
         self.assertLessEqual(sum(sleeps), 10.0 + 1e-9)
         self.assertTrue(any("已按总上限压缩" in l for l in LOGGER.messages() if "打字模型" in l))
 
-    async def test_send_failure_keeps_last_segment_and_never_resends_full_text(self):
-        ctx = FakeContext(fail_send_at=1)  # 第二段发送时炸
-        plugin = self.build(ctx, segmented_jitter=jitter_conf(min_segment_chars=0))
-        event = FakeEvent(chain=[FakePlain(TEXT)])
+    async def test_group_session_works_too(self):
+        plugin = self.build(segmented_jitter=jitter_conf(min_segment_chars=0))
+        event = FakeEvent(chain=[FakePlain(TEXT)], private=False, umo=GROUP_UMO)
         with fast_sleep([]):
             await plugin.apply_reply_delay(event)
-
-        self.assertEqual(len(ctx.sent), 1, "第一段发出去了")
-        self.assertEqual(event.get_result().chain[0].text, "我还没吃！")
-        self.assertTrue(any("分段发送失败" in l for l in LOGGER.messages("exception")))
-        # 绝不能出现「完整正文又被发一遍」
-        leftover = event.get_result().chain[0].text
-        self.assertNotEqual(leftover, TEXT)
+            await fire_sent(plugin, event)
+        self.assertEqual([c.chain[0].text for _, c in self.ctx.sent], SEGMENTS[1:])
+        self.assertEqual([umo for umo, _ in self.ctx.sent], [GROUP_UMO, GROUP_UMO])
 
     async def test_typing_model_skips_flat_reply_delay(self):
         plugin = self.build(
@@ -1006,6 +1060,7 @@ class TestWiringSplitAndSend(WiringBase):
         with patch.object(plugin_main, "reply_delay_seconds") as spy:
             with fast_sleep([]):
                 await plugin.apply_reply_delay(event)
+                await fire_sent(plugin, event)
         spy.assert_not_called()
         self.assertTrue(any("跳过 reply_delay" in l for l in LOGGER.messages()))
 
@@ -1062,6 +1117,120 @@ class TestWiringSplitAndSend(WiringBase):
         line = next(l for l in LOGGER.messages() if "打字模型" in l)
         for token in ("入站 2 字", "阅读", "打字", "pre_delay", "段间隔"):
             self.assertIn(token, line)
+
+
+class TestWiringFollowupFailure(WiringBase):
+    """补发失败**不丢正文**：剩下的合并补发；连合并都失败就暂存等 flush 重试。"""
+
+    async def test_followup_failure_resends_remainder_merged(self):
+        ctx = FakeContext(fail_send_at=0)  # 第一条后续段就炸 → 剩下 2 段合并补发
+        plugin = self.build(ctx, segmented_jitter=jitter_conf(min_segment_chars=0))
+        event = FakeEvent(chain=[FakePlain(TEXT)])
+        with fast_sleep([]):
+            await plugin.apply_reply_delay(event)
+            await fire_sent(plugin, event)
+
+        self.assertEqual(len(ctx.sent), 1, "失败后的合并补发")
+        self.assertEqual(ctx.sent[0][1].chain[0].text, "你吃饭了吗？我还没吃！")
+        # 第一段在 result 里、其余正文合并发出去 → 不丢、不重
+        self.assertEqual(
+            event.get_result().chain[0].text + ctx.sent[0][1].chain[0].text, TEXT
+        )
+        self.assertTrue(any("合并补发" in l for l in LOGGER.messages("exception")))
+        self.assertEqual(plugin._unsent_tails, {})
+
+    async def test_double_failure_parks_text_and_flush_retries(self):
+        class AlwaysFail(FakeContext):
+            async def send_message(self, session, message_chain) -> bool:
+                raise RuntimeError("平台挂了")
+
+        ctx = AlwaysFail()
+        plugin = self.build(ctx, segmented_jitter=jitter_conf(min_segment_chars=0))
+        event = FakeEvent(chain=[FakePlain(TEXT)])
+        with fast_sleep([]):
+            await plugin.apply_reply_delay(event)
+            await fire_sent(plugin, event)
+
+        # 正文暂存下来了（没有永久消失）
+        self.assertEqual(plugin._unsent_tails.get(UMO), "你吃饭了吗？我还没吃！")
+        self.assertEqual(
+            event.get_result().chain[0].text + plugin._unsent_tails[UMO], TEXT
+        )
+
+        # flush 循环重试：平台恢复后补发成功，暂存清空
+        ctx.send_message = FakeContext.send_message.__get__(ctx, type(ctx))
+        await plugin._flush_unsent_tails()
+        self.assertEqual(plugin._unsent_tails, {})
+        self.assertEqual([c.chain[0].text for _, c in ctx.sent], ["你吃饭了吗？我还没吃！"])
+
+    async def test_task_cancellation_propagates_and_is_not_leaked(self):
+        plugin = self.build(
+            segmented_jitter=jitter_conf(
+                min_segment_chars=0, pre_min_seconds=0.0, max_seconds=5.0, min_seconds=5.0
+            )
+        )
+        event = FakeEvent(chain=[FakePlain(TEXT)])
+        await plugin.apply_reply_delay(event)
+        task = next(iter(plugin._followup_tasks))
+        await asyncio.sleep(0)  # 让它跑起来（在等钩子信号）
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)
+        self.assertEqual(plugin._followup_tasks, set(), "取消后不该留着任务")
+
+    async def test_hook_without_record_is_a_noop(self):
+        plugin = self.build(segmented_jitter=jitter_conf(min_segment_chars=0))
+        event = FakeEvent(chain=[FakePlain(TEXT)])
+        await plugin.after_message_sent(event)  # 没有登记过后续段
+        self.assertEqual(self.ctx.sent, [])
+
+    async def test_enable_false_registers_nothing(self):
+        plugin = self.build(segmented_jitter=jitter_conf(enable=False))
+        event = FakeEvent(chain=[FakePlain(TEXT)])
+        await plugin.apply_reply_delay(event)
+        self.assertEqual(plugin._followup_tasks, set())
+        self.assertIsNone(plugin._pop_followup(event))
+        self.assertEqual(self.ctx.sent, [])
+
+
+class TestWiringFollowupFallback(WiringBase):
+    """``after_message_sent`` 没触发时的兜底（超时路径）。"""
+
+    async def test_timeout_delivers_when_first_was_sent(self):
+        real = plugin_main.FOLLOWUP_HOOK_TIMEOUT_SECONDS
+        plugin_main.FOLLOWUP_HOOK_TIMEOUT_SECONDS = 0.02
+        try:
+            plugin = self.build(segmented_jitter=jitter_conf(min_segment_chars=0))
+            event = FakeEvent(chain=[FakePlain(TEXT)])
+            with fast_sleep([]):
+                await plugin.apply_reply_delay(event)
+                # 模拟「流水线发完并 clear_result」，但钩子因为别的原因没跑到我们
+                event._result = None
+                tasks = list(plugin._followup_tasks)
+                await asyncio.gather(*tasks)
+        finally:
+            plugin_main.FOLLOWUP_HOOK_TIMEOUT_SECONDS = real
+
+        self.assertEqual([c.chain[0].text for _, c in self.ctx.sent], SEGMENTS[1:])
+        self.assertTrue(any("兜底发送" in l for l in LOGGER.messages("warning")))
+
+    async def test_timeout_skips_when_first_never_went_out(self):
+        real = plugin_main.FOLLOWUP_HOOK_TIMEOUT_SECONDS
+        plugin_main.FOLLOWUP_HOOK_TIMEOUT_SECONDS = 0.02
+        try:
+            plugin = self.build(segmented_jitter=jitter_conf(min_segment_chars=0))
+            event = FakeEvent(chain=[FakePlain(TEXT)])
+            with fast_sleep([]):
+                await plugin.apply_reply_delay(event)
+                # result 还在 = 第一条没发出去（事件被停掉）→ 不许发孤儿后续段
+                tasks = list(plugin._followup_tasks)
+                await asyncio.gather(*tasks)
+        finally:
+            plugin_main.FOLLOWUP_HOOK_TIMEOUT_SECONDS = real
+
+        self.assertEqual(self.ctx.sent, [])
+        self.assertTrue(any("不补发" in l for l in LOGGER.messages("warning")))
 
 
 class TestWiringTypingIndicator(WiringBase):
@@ -1143,7 +1312,7 @@ class TestWiringTypingIndicator(WiringBase):
         with fast_sleep([]):
             await plugin.apply_reply_delay(event)  # 不许抛
 
-        self.assertEqual(event.get_result().chain[0].text, "我还没吃！")
+        self.assertEqual(event.get_result().chain[0].text, SEGMENTS[0])
         self.assertIn(UMO, plugin._typing.unsupported)
         self.assertEqual(len([l for l in LOGGER.messages("debug") if "正在输入" in l]), 1)
 
@@ -1165,7 +1334,7 @@ class TestWiringTypingIndicator(WiringBase):
         with fast_sleep([]):
             await plugin.apply_reply_delay(event)
         self.assertIn(UMO, plugin._typing.unsupported)
-        self.assertEqual(event.get_result().chain[0].text, "我还没吃！")
+        self.assertEqual(event.get_result().chain[0].text, SEGMENTS[0])
 
     async def test_indicator_stops_when_hook_returns(self):
         bot = FakeBot()

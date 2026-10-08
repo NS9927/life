@@ -40,6 +40,7 @@ import asyncio
 import random
 import time
 from collections import deque
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -92,9 +93,42 @@ PROACTIVE_RECENT_MAX = 6
 PROACTIVE_MIN_INTERVAL_SECONDS = 5.0
 """后台检查的最小间隔：防止配置写成 0 后忙等（单测会临时调小）。"""
 
+# ----------------------------------------------------------------------
+# 分段回复的顺序（方案 B）：**第一段走流水线**，其余段在第一条真正发出去之后再发
+#
+# 为什么：引用 / @ 是 result_decorate/stage.py:426-445（以及 at_inline）在**我们的
+# on_decorating_result 之后**才加到链上的。所以「第一段我们自己发」必然丢引用，
+# 而带头的那条一定是最后一段 —— 真机上用户看到的就是「先一条没头没脑的正文 →
+# 再来一条带引用+@的」。方案 B 把第一段留在 result 里交给流水线，用户看到的第一条
+# 就是原汁原味的「引用 + @ + 正文」。
+#
+# 后续段由 after_message_sent 钩子**通知**（钩子触发 = 第一条已发出），实际发送放在
+# 一个后台任务里，避免把 respond 阶段按住十几秒。
+# ----------------------------------------------------------------------
+FOLLOWUP_EXTRA_KEY = "life_segmented_followup"
+"""挂在 event 上的后续段记录（优先 extras，退化到私有属性）。"""
+
+FOLLOWUP_HOOK_TIMEOUT_SECONDS = 30.0
+"""等 ``after_message_sent`` 的上限：超时走兜底发送（先确认第一条真的出去了）。"""
+
 # 埋点挂载在事件对象上的键（优先用 AstrBot 的 extras，退化成私有属性）
 TIMING_EXTRA_KEY = "life_timing"
 TIMING_FILE_NAME = "timing.jsonl"
+
+
+@dataclass
+class _FollowUp:
+    """「第一段已发出之后要补发的其余段」的记录（由 after_message_sent 唤醒）。"""
+
+    umo: str
+    tail: tuple[str, ...]
+    """第 2..N 段。"""
+    delays: tuple[float, ...]
+    """``TimingPlan.segment_delays``：``delays[i]`` = 第 i 段与第 i+1 段之间的间隔。
+
+    补发第 k 段（k>=1）之前要等 ``delays[k-1]``。"""
+    event: object
+    signal: asyncio.Event
 
 
 class TimingSink:
@@ -212,6 +246,9 @@ class ReplyGate(Star):
         # 「正在输入」状态：默认关闭（_apply_config 重建；unsupported 记忆也在实例上）
         self._typing = typing_mod.TypingIndicator(logger=logger)
         self._typing_logged = ""
+        # 方案 B：后续段的补发任务 + 两次补发都失败时暂存的正文（等 flush 重试）
+        self._followup_tasks: set[asyncio.Task] = set()
+        self._unsent_tails: dict[str, str] = {}
         # 延迟埋点（debug_timing，默认关；开了才写文件）
         self._timing_enabled = False
         self._timing_sink = TimingSink()
@@ -449,7 +486,8 @@ class ReplyGate(Star):
         flush, self._task = self._task, None
         proactive_task, self._proactive_task = self._proactive_task, None
         retired, self._proactive_retired = self._proactive_retired, []
-        for task in (flush, proactive_task, *retired):
+        followups, self._followup_tasks = list(self._followup_tasks), set()
+        for task in (flush, proactive_task, *retired, *followups):
             if task and not task.done():
                 task.cancel()
             if task is None:
@@ -460,6 +498,10 @@ class ReplyGate(Star):
                 pass
             except Exception:  # 后台任务里的异常只记日志，绝不让卸载失败
                 logger.exception("[%s] 后台循环收尾异常（已忽略）", PLUGIN_NAME)
+        if self._unsent_tails:
+            logger.warning(
+                "[%s] 卸载时还有 %d 个会话的正文没补发成功（已放弃）", PLUGIN_NAME, len(self._unsent_tails)
+            )
         logger.info("[%s] 已卸载", PLUGIN_NAME)
 
     def _start_flush_loop(self) -> None:
@@ -483,6 +525,7 @@ class ReplyGate(Star):
                 if not self._running:
                     break
                 await self._maybe_flush()
+                await self._flush_unsent_tails()  # 暂存正文的重试（方案 B 兜底）
             except asyncio.CancelledError:
                 raise  # 不要吞，否则 terminate() 的 await 会挂住
             except Exception:
@@ -1226,49 +1269,210 @@ class ReplyGate(Star):
                 "[%s] 本次用打字模型，跳过 reply_delay（避免等两次）", PLUGIN_NAME
             )
 
-        # ★改写点：从这里起 result 只带最后一段。之后的任何异常都不会导致正文重发。
-        last = segments[-1]
-        chain[:] = [Plain(last)]
-
-        # 等待期间并发续「正在输入」；没有实际等待（total=0）就别开任务，
-        # 否则状态会在消息发出之后才过期，看起来像「发完还在打字」。
-        if plan.total <= 0:
-            return True, await self._send_typing_segments(target.umo, segments, plan)
-
-        sender = self._typing_sender(event)
-        async with self._typing.indicator(target, sender):
-            waited = await self._send_typing_segments(target.umo, segments, plan)
-        return True, waited
-
-    async def _send_typing_segments(
-        self, umo: str, segments: list[str], plan: segmented.TimingPlan
-    ) -> float:
-        """发前 N-1 段 + 每段之后按计划停顿。返回实际等待秒数。"""
+        # 等待期间并发续「正在输入」；只在**第一条发出之前**续——真人打完字就发出去了，
+        # 第一条之后不该还显示正在输入。所以这里只包住 pre_delay。
         waited = 0.0
         if plan.pre_delay > 0:
-            await asyncio.sleep(plan.pre_delay)
+            sender = self._typing_sender(event)
+            async with self._typing.indicator(target, sender):
+                await asyncio.sleep(plan.pre_delay)
             waited += plan.pre_delay
 
-        head = segments[:-1]
-        for index, part in enumerate(head):
+        if len(segments) == 1:
+            # 单段：不动 chain、不注册后续段；只贡献 pre_delay
+            # （长回复的打字时间仍然生效，否则「长回复更久」对 D 这种无标点长句就失效了）
+            return True, waited
+
+        # ★方案 B 的改写点：只把**第一段**留在 result 里，交给流水线给它加引用/@ 再发出。
+        #   其余段由 after_message_sent 唤醒的后台任务补发（见 _schedule_followups）。
+        first, tail = segments[0], tuple(segments[1:])
+        chain[:] = [Plain(first)]
+        if tail:
+            self._schedule_followups(event, target.umo, tail, plan.segment_delays)
+        return True, waited
+
+    # ---- 方案 B：第一段之后补发其余段 ----------------------------------
+    def _schedule_followups(
+        self,
+        event: AstrMessageEvent,
+        umo: str,
+        tail: tuple[str, ...],
+        delays: tuple[float, ...],
+    ) -> None:
+        """登记后续段，并起一个等 ``after_message_sent`` 的后台任务。"""
+        record = _FollowUp(
+            umo=umo,
+            tail=tuple(tail),
+            delays=tuple(delays),
+            event=event,
+            signal=asyncio.Event(),
+        )
+        self._stash_followup(event, record)
+        try:
+            task = asyncio.get_running_loop().create_task(
+                self._deliver_followups(record), name=f"{PLUGIN_NAME}-followup"
+            )
+        except RuntimeError:
+            # 理论上到不了（本方法在协程里）：别留一个没人等的记录
+            logger.warning(
+                "[%s] 拿不到事件循环，后续 %d 段无法补发", PLUGIN_NAME, len(record.tail)
+            )
+            self._pop_followup(event)
+            return
+        self._followup_tasks.add(task)
+        task.add_done_callback(self._followup_tasks.discard)
+
+    async def _deliver_followups(self, record: _FollowUp) -> int:
+        """等第一条真正发出，再按抖动间隔补发 ``record.tail``。返回成功发出的段数。
+
+        超时兜底：``after_message_sent`` 没触发时，**先确认第一条真的出去了**
+        （respond 阶段跑完会 ``event.clear_result()``）才补发——
+        否则事件被停掉时会发出「没有第一段」的孤儿后续段。
+        """
+        try:
             try:
-                await self.context.send_message(umo, MessageChain(chain=[Plain(part)]))
-            except Exception:
-                # 已经发出去的段无法撤回；剩下的段不再补发（result 里只有最后一段，
-                # 流水线会把它发出去），绝不重复发送正文
-                logger.exception(
-                    "[%s] 分段发送失败，剩余分段不再补发（最后一段仍由流水线发出）session=%s",
-                    PLUGIN_NAME,
-                    umo,
+                await asyncio.wait_for(
+                    record.signal.wait(), timeout=FOLLOWUP_HOOK_TIMEOUT_SECONDS
                 )
-                break
-            # 发完这一段，等「把下一段打出来」的时间；最后一段由流水线发出，
-            # 所以这里连最后一个 head 段的间隔也要睡（N 段 → N-1 个间隔）
-            gap = plan.segment_delays[index]
+            except asyncio.TimeoutError:
+                if self._first_segment_still_pending(record):
+                    logger.warning(
+                        "[%s] after_message_sent 未触发且第一条似乎没发出去，"
+                        "后续 %d 段不补发（避免孤儿段）session=%s",
+                        PLUGIN_NAME,
+                        len(record.tail),
+                        record.umo,
+                    )
+                    return 0
+                logger.warning(
+                    "[%s] after_message_sent 未触发，改用兜底发送后续 %d 段 session=%s",
+                    PLUGIN_NAME,
+                    len(record.tail),
+                    record.umo,
+                )
+            return await self._send_followup_segments(record)
+        except asyncio.CancelledError:
+            raise  # 卸载时取消：不要吞
+        except Exception:
+            logger.exception("[%s] 后续分段发送异常 session=%s", PLUGIN_NAME, record.umo)
+            return 0
+
+    @staticmethod
+    def _first_segment_still_pending(record: _FollowUp) -> bool:
+        """第一条是否还没被流水线发出去（结果还挂在 event 上 = respond 阶段没跑完）。"""
+        try:
+            getter = getattr(record.event, "get_result", None)
+            return callable(getter) and getter() is not None
+        except Exception:
+            return False  # 拿不准就别拦着补发
+
+    async def _send_followup_segments(self, record: _FollowUp) -> int:
+        """按计划逐段补发 tail。返回**已成功发出去的段数**。
+
+        失败时**绝不丢正文**：把剩下的段合并成一条补发（已发出的段不重发）。
+        """
+        sent = 0
+        for index, part in enumerate(record.tail):
+            gap = record.delays[index] if index < len(record.delays) else 0.0
             if gap > 0:
-                await asyncio.sleep(gap)
-                waited += gap
-        return waited
+                await asyncio.sleep(gap)  # 基准 = 第一条真正发出的时刻（钩子触发点）
+            try:
+                await self.context.send_message(
+                    record.umo, MessageChain(chain=[Plain(part)])
+                )
+            except Exception:
+                remaining = "".join(record.tail[index:])
+                logger.exception(
+                    "[%s] 后续分段发送失败，把剩余 %d 段合并补发 session=%s（已发 %d 段不重发）",
+                    PLUGIN_NAME,
+                    len(record.tail) - index,
+                    record.umo,
+                    sent,
+                )
+                await self._resend_remainder(record.umo, remaining)
+                return sent
+            sent += 1
+        return sent
+
+    async def _resend_remainder(self, umo: str, text: str) -> bool:
+        """把没发出去的正文合并成一条补发；连这条都失败就暂存，等 flush 再试。"""
+        if not text:
+            return True
+        try:
+            await self.context.send_message(umo, MessageChain(chain=[Plain(text)]))
+            return True
+        except Exception:
+            self._unsent_tails[umo] = self._unsent_tails.get(umo, "") + text
+            logger.exception(
+                "[%s] 合并补发也失败，剩余正文已暂存（下一次 flush 重试）session=%s",
+                PLUGIN_NAME,
+                umo,
+            )
+            return False
+
+    async def _flush_unsent_tails(self) -> None:
+        """flush 循环每轮重试暂存的正文——**不让正文永久消失**。"""
+        if not self._unsent_tails:
+            return
+        pending, self._unsent_tails = self._unsent_tails, {}
+        for umo, text in pending.items():
+            try:
+                await self.context.send_message(umo, MessageChain(chain=[Plain(text)]))
+                logger.info(
+                    "[%s] 暂存正文补发成功 session=%s（%d 字）", PLUGIN_NAME, umo, len(text)
+                )
+            except Exception:
+                self._unsent_tails[umo] = self._unsent_tails.get(umo, "") + text
+                logger.exception("[%s] 暂存正文补发仍失败，继续留着 session=%s", PLUGIN_NAME, umo)
+
+    def _stash_followup(self, event, record: _FollowUp) -> None:
+        """把后续段记录挂在 event 上（优先 extras，退化到私有属性）。"""
+        try:
+            event.set_extra(FOLLOWUP_EXTRA_KEY, record)
+            return
+        except Exception:
+            pass
+        try:
+            setattr(event, FOLLOWUP_EXTRA_KEY, record)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _pop_followup(event):
+        try:
+            record = event.get_extra(FOLLOWUP_EXTRA_KEY, None)
+            if record is not None:
+                event.set_extra(FOLLOWUP_EXTRA_KEY, None)
+                return record
+        except Exception:
+            pass
+        record = getattr(event, FOLLOWUP_EXTRA_KEY, None)
+        if record is not None:
+            try:
+                setattr(event, FOLLOWUP_EXTRA_KEY, None)
+            except Exception:
+                pass
+        return record
+
+    @filter.after_message_sent(priority=GATE_PRIORITY)
+    async def after_message_sent(self, event: AstrMessageEvent) -> None:
+        """第一条（带引用/@ 的那条）真的发出去之后，唤醒后续段补发。
+
+        触发点：``core/pipeline/respond/stage.py:328``
+        ``if await call_event_hook(event, EventType.OnAfterMessageSentEvent)``
+        —— 所有段发完之后、``event.clear_result()`` 之前，handler 拿到的是**同一个 event**
+        （``core/pipeline/context_utils.py:95-110`` 用 ``handler.handler(event)`` 调用）。
+
+        ★这里只 ``set()`` 一个事件、**不做发送**：既不阻塞 respond 阶段，也让
+        「段间抖动的基准 = 第一条真正发出的时刻」天然成立。
+        """
+        try:
+            record = self._pop_followup(event)
+            if record is not None:
+                record.signal.set()
+        except Exception:
+            # 唤醒失败不会丢正文：后台任务等超时后走兜底发送
+            logger.exception("[%s] after_message_sent 唤醒失败（后续段改走兜底）", PLUGIN_NAME)
 
     # ---- 「正在输入」 --------------------------------------------------
     @staticmethod
