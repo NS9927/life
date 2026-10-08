@@ -126,7 +126,7 @@
       <h1>闸门设置</h1>
       <span id="ver" class="ver"></span>
     </div>
-    <p class="sub">拟人化闸门 —— 按作息概率放行消息，被点名分档回复，防两个 bot 互刷烧 token。上面 4 个标签页分别是：基础闸门 / 回话策略 / 防刷与睡眠 / 主动开口；本页只保存这 4 个板块的字段。</p>
+    <p class="sub">拟人化闸门 —— 按作息概率放行消息，被点名分档回复，防两个 bot 互刷烧 token。上面 5 个标签页分别是：基础闸门 / 回话策略 / 防刷与睡眠 / 主动开口 / 打字与拟人；本页只保存这 5 个板块的字段。</p>
     <div id="errBar" class="errbar" hidden></div>
   </header>
 
@@ -136,7 +136,7 @@
 
   <div class="card">
     <p class="note">
-      本页<b>只保存这 4 个板块的 48 个字段</b>：在别的页面保存不会覆盖这里的设置，反之亦然；作息曲线 / 插值半径 / 周末系数在「作息活跃度」页面调整。切标签页不会丢未保存的修改。
+      本页<b>只保存这 5 个板块的 65 个字段</b>：在别的页面保存不会覆盖这里的设置，反之亦然；作息曲线 / 插值半径 / 周末系数在「作息活跃度」页面调整。切标签页不会丢未保存的修改。
     </p>
   </div>
 
@@ -261,6 +261,35 @@
         { path: 'proactive.system_prompt', type: 'text', label: '额外人设提示（可选）', def: '', rows: 3, placeholder: '留空 = 用 AstrBot 的默认人设', desc: '主动开口时额外追加的人设提示。留空 = 用 AstrBot 的默认人设。' },
         { path: 'proactive.prompt_template', type: 'text', label: '主动开口提示词模板', def: '（现在没什么事，想主动找 Ta 说句话。可以参考最近的聊天，但不要复述。）', rows: 3, desc: '生成主动内容时用的提示模板。' }
       ]
+    },
+    {
+      title: '分段与打字节奏',
+      desc: '按「阅读 + 打字」时间模型把一条回复拆成几段发出来，间隔按字数算，更像真人在打字。默认关闭。',
+      fields: [
+        { path: 'segmented_jitter.enable', type: 'bool', label: '启用「阅读+打字」时间模型', def: false, desc: '★默认关闭。开启时建议把 AstrBot 内置的分段回复关掉，否则两套分段会叠加。' },
+        { path: 'segmented_jitter.typing_chars_per_second', type: 'number', label: '打字速度', def: 3.5, min: 0.5, max: 20, step: 0.5, unit: '字/秒', desc: '字/秒，人约 2~5。' },
+        { path: 'segmented_jitter.reading_chars_per_second', type: 'number', label: '阅读速度', def: 12, min: 1, max: 50, step: 0.5, unit: '字/秒', desc: '字/秒，人约 8~15。' },
+        { path: 'segmented_jitter.pre_min_seconds', type: 'number', label: '第一条之前的下限', def: 0.8, min: 0, max: 600, step: 0.1, unit: '秒' },
+        { path: 'segmented_jitter.pre_max_seconds', type: 'number', label: '第一条之前的上限', def: 15, min: 0, max: 600, step: 0.1, unit: '秒', desc: '打字时间到顶后不再增长。' },
+        { path: 'segmented_jitter.min_seconds', type: 'number', label: '段间下限', def: 0.6, min: 0, max: 600, step: 0.1, unit: '秒' },
+        { path: 'segmented_jitter.max_seconds', type: 'number', label: '段间上限', def: 3, min: 0, max: 600, step: 0.1, unit: '秒' },
+        { path: 'segmented_jitter.jitter', type: 'number', label: '抖动比例', def: 0.25, min: 0, max: 1, step: 0.05, desc: '实际时长 = 基准 × uniform(1−j, 1+j)。' },
+        { path: 'segmented_jitter.max_segments', type: 'number', label: '最多切几段', def: 4, min: 1, max: 50, step: 1, unit: '段', desc: '超出的并进最后一段。' },
+        { path: 'segmented_jitter.max_total_seconds', type: 'number', label: '整条回复总耗时上限', def: 30, min: 0, max: 3600, step: 1, unit: '秒', desc: '超了等比压缩，每段有保底。' },
+        { path: 'segmented_jitter.split_chars', type: 'text', label: '在这些字符后切分', def: '。！？!?\n…；;', rows: 2, desc: '在这些字符后切分，标点保留。多行也行；整段字符串提交，不会按逗号切成数组。' },
+        { path: 'segmented_jitter.min_segment_chars', type: 'number', label: '太短的段合并进相邻段', def: 6, min: 0, max: 200, step: 1, unit: '字' },
+        { path: 'segmented_jitter.count_incoming_chars', type: 'bool', label: '阅读时间计入对方字数', def: true, desc: '把你发来的消息字数也算进阅读时间。' }
+      ]
+    },
+    {
+      title: '正在输入状态',
+      desc: '先亮「正在输入…」，过一会儿再把内容发出去。默认关闭。',
+      fields: [
+        { path: 'typing_indicator.enable', type: 'bool', label: '启用「正在输入」状态', def: false, desc: '★默认关闭。' },
+        { path: 'typing_indicator.refresh_seconds', type: 'number', label: '续期间隔', def: 4, min: 1, max: 300, step: 0.5, unit: '秒', desc: '「正在输入」状态会过期，需要定时续。' },
+        { path: 'typing_indicator.private', type: 'bool', label: '私聊发送「正在输入」', def: true },
+        { path: 'typing_indicator.group', type: 'bool', label: '群聊发送「正在输入」', def: false, desc: '⚠️ NapCat 不支持群「正在输入」：硬开等于给该群的发言者发一条私聊状态，而不是群状态。' }
+      ]
     }
   ];
 
@@ -268,7 +297,8 @@
     { id: 'base', name: '基础闸门', cardIdx: [0, 1] },
     { id: 'reply', name: '回话策略', cardIdx: [2, 3] },
     { id: 'anti', name: '防刷与睡眠', cardIdx: [4, 5, 6] },
-    { id: 'proact', name: '主动开口', cardIdx: [7] }
+    { id: 'proact', name: '主动开口', cardIdx: [7] },
+    { id: 'typing', name: '打字与拟人', cardIdx: [8, 9] }
   ];
 
 
@@ -480,7 +510,7 @@
     return card;
   }
 
-  // 4 个板块的表单一次性全部渲染进 DOM，切 tab 只切 display —— 所以切走再切回不会丢未保存的修改，
+  // 5 个板块的表单一次性全部渲染进 DOM，切 tab 只切 display —— 所以切走再切回不会丢未保存的修改，
   // 保存时也自然是「按全部板块取值」。
   function buildForm() {
     groupsEl.innerHTML = '';

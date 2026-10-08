@@ -302,6 +302,103 @@
       }
     }
   },
+  "segmented_jitter": {
+    "description": "分段回复的时间模型：先读你发来的话、再按字数「打字」，段与段之间带抖动。★默认关闭；开启后会接管前 N-1 段（自己发送），最后一段仍由 AstrBot 发出。注意：它与内置 platform_settings.segmented_reply 会叠加，建议二选一",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用打字模型（★默认关闭）",
+        "type": "bool",
+        "default": false
+      },
+      "typing_chars_per_second": {
+        "description": "打字速度（字/秒）。人约 2~5；调大 = 打字更快、段间更短。真机排障日志里的「打字 x.xxs」就是拿它算的",
+        "type": "float",
+        "default": 3.5
+      },
+      "reading_chars_per_second": {
+        "description": "阅读速度（字/秒）。人约 8~15；只影响第 1 段之前的等待",
+        "type": "float",
+        "default": 12.0
+      },
+      "pre_min_seconds": {
+        "description": "第 1 段之前的等待下限（秒）",
+        "type": "float",
+        "default": 0.8
+      },
+      "pre_max_seconds": {
+        "description": "第 1 段之前的等待上限（秒），别让人等太久。★长回复「打字更久」就是靠它撑开的：约 (上限 × 打字速度) 字以内越长越久，之后到顶不再增长",
+        "type": "float",
+        "default": 15.0
+      },
+      "min_seconds": {
+        "description": "段与段之间的间隔下限（秒）",
+        "type": "float",
+        "default": 0.6
+      },
+      "max_seconds": {
+        "description": "段与段之间的间隔上限（秒）",
+        "type": "float",
+        "default": 3.0
+      },
+      "jitter": {
+        "description": "抖动比例：实际 = 基准 × uniform(1-jitter, 1+jitter)。0 = 不抖（真人不会准点）",
+        "type": "float",
+        "default": 0.25
+      },
+      "max_segments": {
+        "description": "最多切几段，超出的并进最后一段",
+        "type": "int",
+        "default": 4
+      },
+      "max_total_seconds": {
+        "description": "整条回复的总耗时上限（含第 1 段之前），超了等比压缩；压缩有保底，不会压成 0 秒连发。0 = 不限制",
+        "type": "float",
+        "default": 30.0
+      },
+      "split_chars": {
+        "description": "在这些字符之后切分（标点保留在前一段末尾）；\\n 表示换行",
+        "type": "string",
+        "default": "。！？!?\n…；;"
+      },
+      "min_segment_chars": {
+        "description": "太短的段不单独发，并进相邻段",
+        "type": "int",
+        "default": 6
+      },
+      "count_incoming_chars": {
+        "description": "把入站消息字数算进「阅读」时间（只算纯文本段；取不到就按 0）",
+        "type": "bool",
+        "default": true
+      }
+    }
+  },
+  "typing_indicator": {
+    "description": "「正在输入」状态：在等待期间（打字模型 / 回复延迟）持续给对端显示「正在输入」。★默认关闭。能力边界（2026-10-08 实测 NapCat）：私聊走 OneBot 的 set_input_status，可用；群聊 NapCat 没有对应 API（set_group_typing 不存在、带 group_id 直接 schema 报错），所以 group 默认 false",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用「正在输入」（★默认关闭）",
+        "type": "bool",
+        "default": false
+      },
+      "refresh_seconds": {
+        "description": "续期间隔（秒）。「正在输入」几秒后会过期，需要定时续；最小 1 秒",
+        "type": "float",
+        "default": 4.0
+      },
+      "private": {
+        "description": "私聊是否发（NapCat 实测支持）",
+        "type": "bool",
+        "default": true
+      },
+      "group": {
+        "description": "群聊是否发。★默认关：NapCat 没有群聊「正在输入」API；硬开会变成给该群发言者发一个私聊的「正在输入」",
+        "type": "bool",
+        "default": false
+      }
+    }
+  },
   "debug_timing": {
     "description": "延迟埋点：把每条被处理消息的时序（平台发出时间 → 我们开始处理 → 判定 → 进入发送 → 延时结束）写进 plugin_data/life/timing.jsonl，用来定位「放行之后到真正发送」之间的滞后。默认关闭，开了才会写文件",
     "type": "bool",

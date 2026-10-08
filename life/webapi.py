@@ -58,6 +58,8 @@ SETTINGS_KEYS = frozenset(
         "addressed_reply",
         "addressed_max_age_seconds",
         "proactive",
+        "segmented_jitter",
+        "typing_indicator",
         "debug_timing",
     }
 )

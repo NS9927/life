@@ -49,8 +49,9 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import Plain
 from astrbot.core.message.message_event_result import MessageChain
 
-from .core import batch as batch_mod, classify, coerce, proactive
+from .core import batch as batch_mod, classify, coerce, proactive, segmented
 from .core import queue as queue_mod, schedule, timing as timing_mod
+from .core import typing_indicator as typing_mod
 from .core.delay import DelayConfig, reply_delay_seconds
 from .core.gate import Action, Gate, GateConfig, MessageInfo, MessageKind
 
@@ -206,6 +207,11 @@ class ReplyGate(Star):
         self._proactive_task: asyncio.Task | None = None
         self._proactive_retired: list[asyncio.Task] = []
         self._recent: dict[str, deque[str]] = {}
+        # 分段回复的时间模型（打字抖动）：默认关闭（_apply_config 重建）
+        self._seg_cfg = segmented.SegmentedJitterConfig()
+        # 「正在输入」状态：默认关闭（_apply_config 重建；unsupported 记忆也在实例上）
+        self._typing = typing_mod.TypingIndicator(logger=logger)
+        self._typing_logged = ""
         # 延迟埋点（debug_timing，默认关；开了才写文件）
         self._timing_enabled = False
         self._timing_sink = TimingSink()
@@ -252,6 +258,18 @@ class ReplyGate(Star):
 
         self._gate.config = GateConfig.from_raw(raw)
         self._delay_cfg = DelayConfig.from_raw(raw.get("reply_delay"))
+        # 分段回复的时间模型（先读再打 + 段间抖动）；默认关闭
+        self._seg_cfg = segmented.SegmentedJitterConfig.from_raw(raw.get("segmented_jitter"))
+        # 「正在输入」：默认关闭。重建实例会清掉「该会话不支持」的记忆——配置改过就重试一次，
+        # 这是想要的：用户可能正是去开了 NapCat 的开关才回来改配置的。
+        self._typing = typing_mod.TypingIndicator(
+            typing_mod.TypingIndicatorConfig.from_raw(raw.get("typing_indicator")),
+            logger=logger,
+        )
+        line = self._typing.config.describe()
+        if self._typing.config.enable and line != self._typing_logged:
+            self._typing_logged = line
+            logger.info("[%s] %s", PLUGIN_NAME, line)
 
         # 被点名的回复策略：活跃度高→立刻回；低→攒一波统一回；0→睡眠排队
         addressed = coerce.as_mapping(raw.get("addressed_reply"))
@@ -1060,9 +1078,20 @@ class ReplyGate(Star):
     # ------------------------------------------------------------------
     @filter.on_decorating_result(priority=GATE_PRIORITY)
     async def apply_reply_delay(self, event: AstrMessageEvent):
-        """按作息给回复加延迟，替代固定秒回。
+        """按作息给回复加延迟，替代固定秒回；开了分段抖动就走「先读再打」模型。
 
-        只做延迟，不碰 @ 和引用的插入——那是 astrbot_plugin_at_inline 的职责。
+        只做延迟和分段发送，不碰 @ 和引用的插入——那是 astrbot_plugin_at_inline 的职责。
+
+        顺序（同一个钩子里，**先延迟、后分段**）：
+
+        1. ``segmented_jitter.enable`` → 用打字模型算 pre_delay + 段间间隔，
+           前 N-1 段自己 ``context.send_message`` 发掉，最后一段留在 result 里；
+           **此时跳过扁平的 reply_delay**（打字模型已经涵盖「不是秒回」，避免等两次）。
+        2. 打字模型没生效（没开 / 结果不是纯文本 / 空内容）→ 走原来的 reply_delay。
+
+        安全红线：``enable=false`` 时**什么都不做**（不读配置、不切分、不 sleep）；
+        ``CancelledError`` 必须 ``raise``；任何异常 ``logger.exception`` 后保证
+        最后一段仍由流水线发出（绝不吞回复，也绝不重复发正文）。
         """
         # 闸门阶段挂上来的埋点记录（默认关闭时是 None，零副作用）
         pending = self._pop_timing(event)
@@ -1086,7 +1115,26 @@ class ReplyGate(Star):
         # 延迟是可选的，但会话冷却的计时不受它开关影响：
         # 关了延迟也得记「刚回过一条」，否则冷却永远不触发。
         delay = 0.0
-        if self._delay_cfg.enable:
+        used_typing_model = False
+        # 「正在输入」的 target：私聊用对端 QQ（set_input_status 的 user_id）
+        target = typing_mod.TypingTarget(
+            umo=umo,
+            is_private=bool(event.is_private_chat()),
+            user_id=str(event.get_sender_id() or ""),
+        )
+
+        if self._seg_cfg.enable:
+            try:
+                used_typing_model, waited = await self._apply_typing_model(event, target)
+                delay += waited
+            except asyncio.CancelledError:
+                raise  # 不要吞，否则 terminate()/停机流程会挂住
+            except Exception:
+                # ★绝不因为抖动把回复吞掉：这里只记日志，让结果照常被发出去
+                logger.exception("[%s] 分段抖动异常，本条放行原样发送", PLUGIN_NAME)
+                used_typing_model = False
+
+        if not used_typing_model and self._delay_cfg.enable:
             now = datetime.now()
             activity = schedule.activity_ratio(
                 now,
@@ -1110,11 +1158,152 @@ class ReplyGate(Star):
                         activity,
                         "，睡眠中" if asleep else "",
                     )
-                await asyncio.sleep(seconds)
-                delay = seconds  # 实际睡了多少秒（0 = 没睡）
+                # 等的时候同时把「正在输入」续起来（真的要发消息才会走到这里）
+                async with self._typing.indicator(target, self._typing_sender(event)):
+                    await asyncio.sleep(seconds)
+                delay += seconds  # 实际睡了多少秒（0 = 没睡）
 
         # 真的发出去一条，才计入会话冷却
         self._gate.record_reply(umo)
 
         # 延时结束、准备交给 AstrBot 发送：这条时序到这里就齐了，落盘
         self._finish_timing(pending, delay=delay, ready=time.time())
+
+    # ------------------------------------------------------------------
+    # 分段回复的时间模型（打字抖动）
+    # ------------------------------------------------------------------
+    async def _apply_typing_model(
+        self, event: AstrMessageEvent, target: typing_mod.TypingTarget
+    ) -> tuple[bool, float]:
+        """在钩子里实现「先读再打 + 段间抖动」。
+
+        返回 ``(是否接管, 实际等待秒数)``；没接管（结果不是纯文本 / 切不出多段 /
+        空内容）时返回 ``(False, 0.0)``，由调用方退回扁平的 reply_delay。
+
+        **不重不漏的保证**（这是本功能最容易出错的地方）：
+
+        - 结果链**全是 Plain** 才动手（有图片 / at 等非文本段 → 整条不切，保守）；
+        - 先按字数算好 ``TimingPlan`` 并打日志，**然后立刻把结果链的文本改成「最后一段」**，
+          再去 sleep + 发送前面的段。也就是说：**改写只发生一次，且在任何 sleep/send 之前**。
+        - 前 N-1 段我们自己 ``context.send_message`` 发；最后一段**只**存在于 result 里，
+          由流水线在钩子返回后正常发出。
+        - 中途发失败：只记日志并停止发送剩余段，**result 里已经是最后一段**，
+          流水线照发 → 已发出去的段不会被重复，正文也不会整条重发（绝不会出现
+          「前几段发过 + 完整正文又发一遍」）。
+        """
+        result = event.get_result()
+        chain = getattr(result, "chain", None)
+        if not chain or not all(isinstance(comp, Plain) for comp in chain):
+            # 有非文本段（图片/at/转发…）：整条不切，交给扁平延迟
+            return False, 0.0
+
+        text = "".join(getattr(comp, "text", "") or "" for comp in chain)
+        if not text.strip():
+            return False, 0.0
+
+        # ★零副作用：enable=false 时上面的调用方根本不会进来（这个函数里也不读配置之外的东西）
+        segments = segmented.split_text(text, self._seg_cfg)
+        if not segments:
+            return False, 0.0
+
+        incoming_chars = self._incoming_chars(event) if self._seg_cfg.count_incoming_chars else 0
+        plan = segmented.plan_timing(incoming_chars, segments, self._seg_cfg, self._rng)
+
+        # 真机排障靠这一行：用户拿它调 typing_chars_per_second / reading_chars_per_second
+        logger.info(
+            "[%s] 打字模型 %s | 切成 %d 段 | %s%s",
+            PLUGIN_NAME,
+            target.umo,
+            len(segments),
+            plan.log_line(),
+            "" if len(segments) > 1 else "（单段，只走 pre_delay 不分段）",
+        )
+        if self._delay_cfg.enable:
+            logger.info(
+                "[%s] 本次用打字模型，跳过 reply_delay（避免等两次）", PLUGIN_NAME
+            )
+
+        # ★改写点：从这里起 result 只带最后一段。之后的任何异常都不会导致正文重发。
+        last = segments[-1]
+        chain[:] = [Plain(last)]
+
+        # 等待期间并发续「正在输入」；没有实际等待（total=0）就别开任务，
+        # 否则状态会在消息发出之后才过期，看起来像「发完还在打字」。
+        if plan.total <= 0:
+            return True, await self._send_typing_segments(target.umo, segments, plan)
+
+        sender = self._typing_sender(event)
+        async with self._typing.indicator(target, sender):
+            waited = await self._send_typing_segments(target.umo, segments, plan)
+        return True, waited
+
+    async def _send_typing_segments(
+        self, umo: str, segments: list[str], plan: segmented.TimingPlan
+    ) -> float:
+        """发前 N-1 段 + 每段之后按计划停顿。返回实际等待秒数。"""
+        waited = 0.0
+        if plan.pre_delay > 0:
+            await asyncio.sleep(plan.pre_delay)
+            waited += plan.pre_delay
+
+        head = segments[:-1]
+        for index, part in enumerate(head):
+            try:
+                await self.context.send_message(umo, MessageChain(chain=[Plain(part)]))
+            except Exception:
+                # 已经发出去的段无法撤回；剩下的段不再补发（result 里只有最后一段，
+                # 流水线会把它发出去），绝不重复发送正文
+                logger.exception(
+                    "[%s] 分段发送失败，剩余分段不再补发（最后一段仍由流水线发出）session=%s",
+                    PLUGIN_NAME,
+                    umo,
+                )
+                break
+            # 发完这一段，等「把下一段打出来」的时间；最后一段由流水线发出，
+            # 所以这里连最后一个 head 段的间隔也要睡（N 段 → N-1 个间隔）
+            gap = plan.segment_delays[index]
+            if gap > 0:
+                await asyncio.sleep(gap)
+                waited += gap
+        return waited
+
+    # ---- 「正在输入」 --------------------------------------------------
+    def _typing_sender(self, event: AstrMessageEvent):
+        """返回一个 sender(target) 协程函数（把 event 绑进去，内核不碰 astrbot 对象）。"""
+
+        async def sender(target: typing_mod.TypingTarget) -> None:
+            bot = getattr(event, "bot", None)
+            call_action = getattr(bot, "call_action", None)
+            if not callable(call_action):
+                # 非 aiocqhttp 适配器（或桩环境）：算「该会话不支持」，只记一次 debug
+                raise RuntimeError("当前平台没有 bot.call_action，无法发「正在输入」")
+            # ★超时在 core 里包（TypingIndicator），这里只管发
+            await call_action("set_input_status", user_id=str(target.user_id), event_type=1)
+
+        return sender
+
+    def _incoming_chars(self, event: AstrMessageEvent) -> int:
+        """入站消息字数（只算 Plain 段）。取不到就 0 —— 不猜、不报错。
+
+        路径（从上到下试）：
+        1. ``event.message_obj.message``（AstrBotMessage.message，Nakuru 消息链）里的 Plain 段；
+        2. ``event.message_obj.message_str``（AstrBot 已经抽好的纯文本）兜底；
+        3. 都没有 → 0（等于不做「阅读」这一段，只用打字时间）。
+        """
+        try:
+            message_obj = getattr(event, "message_obj", None)
+            chain = getattr(message_obj, "message", None)
+            if chain:
+                total = 0
+                for comp in chain:
+                    if isinstance(comp, Plain):
+                        total += len(getattr(comp, "text", "") or "")
+                if total > 0:
+                    return total
+            text = getattr(message_obj, "message_str", None)
+            if isinstance(text, str) and text.strip():
+                return len(text.strip())
+        except Exception:  # 取字数失败绝不能影响发送
+            logger.debug("[%s] 入站字数取不到，按 0 算", PLUGIN_NAME)
+        return 0
+
