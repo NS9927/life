@@ -136,7 +136,7 @@
 
   <div class="card">
     <p class="note">
-      本页<b>只保存这 5 个板块的 65 个字段</b>：在别的页面保存不会覆盖这里的设置，反之亦然；作息曲线 / 插值半径 / 周末系数在「作息活跃度」页面调整。切标签页不会丢未保存的修改。
+      本页<b>只保存这 5 个板块的 67 个字段</b>：在别的页面保存不会覆盖这里的设置，反之亦然；作息曲线 / 插值半径 / 周末系数在「作息活跃度」页面调整。切标签页不会丢未保存的修改。
     </p>
   </div>
 
@@ -276,8 +276,10 @@
         { path: 'segmented_jitter.jitter', type: 'number', label: '抖动比例', def: 0.25, min: 0, max: 1, step: 0.05, desc: '实际时长 = 基准 × uniform(1−j, 1+j)。' },
         { path: 'segmented_jitter.max_segments', type: 'number', label: '最多切几段', def: 4, min: 1, max: 50, step: 1, unit: '段', desc: '超出的并进最后一段。' },
         { path: 'segmented_jitter.max_total_seconds', type: 'number', label: '整条回复总耗时上限', def: 30, min: 0, max: 3600, step: 1, unit: '秒', desc: '超了等比压缩，每段有保底。' },
-        { path: 'segmented_jitter.split_chars', type: 'text', label: '在这些字符后切分', def: '。！？!?\n…；;', rows: 2, desc: '在这些字符后切分，标点保留。多行也行；整段字符串提交，不会按逗号切成数组。' },
-        { path: 'segmented_jitter.min_segment_chars', type: 'number', label: '太短的段合并进相邻段', def: 6, min: 0, max: 200, step: 1, unit: '字' },
+        { path: 'segmented_jitter.split_mode', type: 'select', label: '切分方式', def: 'regex', options: [['regex', 'regex：用正则匹配切段（默认）'], ['chars', 'chars：按切分字符表切']], desc: 'regex = 用正则匹配切段（默认，与 AstrBot 内置语义一致，换行天然成段）；chars = 按下面的切分字符表切。' },
+        { path: 'segmented_jitter.regex', type: 'text', label: '切分正则（仅 regex 模式生效）', def: '[^\\n]*?[。！？!?…；;]+|[^\\n]+', rows: 2, desc: '匹配到的片段即为段；写坏会自动退回 chars 模式并只警告一次。默认值比内置多收 !? ；; 等标点。' },
+        { path: 'segmented_jitter.split_chars', type: 'text', label: '在这些字符后切分', def: '。！？!?\n…；;', rows: 2, desc: '在这些字符后切分，标点保留。仅 chars 模式生效；换行（\\n / \\r\\n / \\r）永远是硬边界，与这里填什么无关。' },
+        { path: 'segmented_jitter.min_segment_chars', type: 'number', label: '太短的段合并进相邻段', def: 6, min: 0, max: 200, step: 1, unit: '字', desc: '仅 chars 模式生效；换行切出来的段豁免合并（哪怕只有 1 个字）。' },
         { path: 'segmented_jitter.count_incoming_chars', type: 'bool', label: '阅读时间计入对方字数', def: true, desc: '把你发来的消息字数也算进阅读时间。' }
       ]
     },
