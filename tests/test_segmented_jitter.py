@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import random
+import re
 import sys
 import unittest
 from datetime import datetime
@@ -52,6 +53,10 @@ class FixedRng:
 
 
 def cfg(**over) -> segmented.SegmentedJitterConfig:
+    """纯逻辑测试的默认配置：显式用 ``chars`` 模式（字符级行为最好断言）。
+
+    ``regex`` 模式（现在的出厂默认）在 TestRegexMode / TestNewlineHardBoundary 里单测。
+    """
     base = dict(
         enable=True,
         typing_chars_per_second=3.5,
@@ -63,12 +68,57 @@ def cfg(**over) -> segmented.SegmentedJitterConfig:
         jitter=0.0,
         max_segments=4,
         max_total_seconds=30.0,
+        split_mode="chars",
         split_chars=segmented.DEFAULT_SPLIT_CHARS,
         min_segment_chars=6,
         count_incoming_chars=True,
     )
     base.update(over)
     return segmented.SegmentedJitterConfig(**base)
+
+
+def regex_cfg(**over) -> segmented.SegmentedJitterConfig:
+    base = dict(
+        enable=True,
+        jitter=0.0,
+        max_segments=4,
+        max_total_seconds=30.0,
+        split_mode="regex",
+        regex=segmented.DEFAULT_REGEX,
+        min_segment_chars=6,
+    )
+    base.update(over)
+    return segmented.SegmentedJitterConfig(**base)
+
+
+# 任务书给的真实样例（A~E）：两种模式都要每行成段
+SAMPLES = {
+    "A": "想吃啥？\n我随便。\n那吃面吧。",
+    "B": "先说一下结论。\n第一点是这样的，要慢慢讲。\n第二点更复杂一些，得展开说。",
+    "C": "一。\n\n二。\n三。",
+    "D": "这是一条没有任何标点也没有换行的很长很长很长很长很长很长很长很长的句子",
+    "E": "Windows 换行\r\n也要能切\r\n还有\r",
+}
+
+EXPECTED_LINES = {
+    "A": ["想吃啥？", "我随便。", "那吃面吧。"],
+    "B": ["先说一下结论。", "第一点是这样的，要慢慢讲。", "第二点更复杂一些，得展开说。"],
+    "C": ["一。", "二。", "三。"],
+    "D": ["这是一条没有任何标点也没有换行的很长很长很长很长很长很长很长很长的句子"],
+    "E": ["Windows 换行", "也要能切", "还有"],
+}
+
+# 内置 result_decorate/stage.py:92（默认值）与真机 abconf 里的现值
+BUILTIN_DEFAULT_REGEX = r".*?[。？！~…]+|.+$"
+REAL_MACHINE_REGEX = r"[^\n]*?[。？！~…（）]+|[^\n]+"
+
+
+def builtin_split(text: str, pattern: str) -> list[str]:
+    """照抄内置 result_decorate/stage.py:226-263 的做法：findall + strip + 丢空段。"""
+    found = re.findall(pattern, text, re.DOTALL | re.MULTILINE)
+    if not found:
+        return [text]
+    return [seg for seg in (item.strip() for item in found) if seg]
 
 
 # ======================================================================
@@ -82,9 +132,11 @@ class TestSplitText(unittest.TestCase):
         self.assertEqual("".join(parts), text)
 
     def test_never_changes_characters(self):
+        # 换行符本身不进正文（内置 regex 也不含换行），所以去掉换行后必须逐字相同
         text = "第一句。第二句！第三句？\n还有一行；结束"
-        parts = segmented.split_text(text, cfg(min_segment_chars=0, max_segments=2))
-        self.assertEqual("".join(parts), text)
+        for config in (cfg(min_segment_chars=0, max_segments=2), regex_cfg(max_segments=2)):
+            parts = segmented.split_text(text, config)
+            self.assertEqual("".join(parts), text.replace("\n", ""), msg=config.split_mode)
 
     def test_strips_outer_whitespace_only(self):
         parts = segmented.split_text("  你好。世界。  ", cfg(min_segment_chars=0))
@@ -127,9 +179,11 @@ class TestSplitText(unittest.TestCase):
         self.assertEqual(with_dot, ["Hello there.", " 你好呀！", "OK?"])
 
     def test_newline_is_a_split_char(self):
-        parts = segmented.split_text("第一行\n第二行\n", cfg(min_segment_chars=0))
-        self.assertEqual(parts, ["第一行\n", "第二行"])  # 尾部换行被整体 strip 掉
-        self.assertEqual("".join(parts), "第一行\n第二行")
+        # 换行永远是边界；换行符本身不进正文
+        for config in (cfg(min_segment_chars=0), regex_cfg()):
+            parts = segmented.split_text("第一行\n第二行\n", config)
+            self.assertEqual(parts, ["第一行", "第二行"], msg=config.split_mode)
+            self.assertEqual("".join(parts), "第一行第二行")
 
     def test_custom_split_chars(self):
         parts = segmented.split_text("a|b|c", cfg(split_chars="|", min_segment_chars=0))
@@ -138,6 +192,159 @@ class TestSplitText(unittest.TestCase):
     def test_no_split_chars_configured_keeps_whole(self):
         parts = segmented.split_text("随便什么文本。", cfg(split_chars="", min_segment_chars=0))
         self.assertEqual(parts, ["随便什么文本。"])
+
+
+class TestNewlineHardBoundary(unittest.TestCase):
+    """真机反馈的核心：**换行必须分段**，短行不许被 min_segment_chars 合并回去。"""
+
+    def test_samples_chars_mode(self):
+        config = cfg(min_segment_chars=6, max_segments=4)
+        for name, text in SAMPLES.items():
+            parts = segmented.split_text(text, config)
+            self.assertEqual(parts, EXPECTED_LINES[name], msg=f"样例 {name}（chars 模式）")
+
+    def test_one_and_two_char_lines_survive(self):
+        # 每条换行行只有 1~3 个字 → 一行一段，绝不合并
+        text = "好\n嗯\n行"
+        for config in (cfg(min_segment_chars=6), regex_cfg(min_segment_chars=6)):
+            self.assertEqual(segmented.split_text(text, config), ["好", "嗯", "行"],
+                             msg=config.split_mode)
+        text2 = "想吃啥？\n我随便。\n那吃面吧。"
+        for config in (cfg(min_segment_chars=6), regex_cfg(min_segment_chars=6)):
+            self.assertEqual(len(segmented.split_text(text2, config)), 3, msg=config.split_mode)
+
+    def test_blank_lines_do_not_produce_empty_segments(self):
+        parts = segmented.split_text("一。\n\n\n二。", cfg(min_segment_chars=0))
+        self.assertEqual(parts, ["一。", "二。"])
+        self.assertEqual(segmented.split_text("\n\n", cfg()), [])
+
+    def test_crlf_and_cr_are_boundaries(self):
+        for config in (cfg(min_segment_chars=0), regex_cfg()):
+            self.assertEqual(
+                segmented.split_text("Windows 换行\r\n也要能切\r\n还有\r", config),
+                ["Windows 换行", "也要能切", "还有"],
+                msg=config.split_mode,
+            )
+
+    def test_literal_backslash_n_config_also_splits(self):
+        """面板/写回把配置改成两字符 ``\\n`` 时，也要能按换行切（chars 模式兜底）。"""
+        config = cfg(split_chars="。！？!?\\n…；;", min_segment_chars=6)
+        self.assertIn(segmented.LITERAL_NEWLINE, config.split_chars)
+        self.assertEqual([ord(c) for c in segmented.LITERAL_NEWLINE], [92, 110])  # \ + n
+        # 文本里是真换行 → 照切
+        self.assertEqual(
+            segmented.split_text("想吃啥？\n我随便。\n那吃面吧。", config),
+            ["想吃啥？", "我随便。", "那吃面吧。"],
+        )
+        # 文本里是字面量 \n → 也还原成换行切
+        self.assertEqual(
+            segmented.split_text("想吃啥？\\n我随便。\\n那吃面吧。", config),
+            ["想吃啥？", "我随便。", "那吃面吧。"],
+        )
+
+    def test_max_segments_never_merges_lines(self):
+        # 6 行、每行 2 个字，max_segments=2 → 行与行绝不合并（换行必切）
+        text = "一。\n二。\n三。\n四。\n五。\n六。"
+        for config in (cfg(min_segment_chars=0, max_segments=2), regex_cfg(max_segments=2)):
+            self.assertEqual(
+                segmented.split_text(text, config),
+                ["一。", "二。", "三。", "四。", "五。", "六。"],
+                msg=config.split_mode,
+            )
+
+    def test_max_segments_still_merges_punctuation_within_a_line(self):
+        # 单行 5 个标点段、上限 3 → 多出来的并进最后一段（老的软语义仍然保留）
+        text = "第一段内容啊。第二段内容啊。第三段内容啊。第四段内容啊。第五段内容啊。"
+        for config in (cfg(min_segment_chars=0, max_segments=3), regex_cfg(max_segments=3)):
+            parts = segmented.split_text(text, config)
+            self.assertEqual(len(parts), 3, msg=config.split_mode)
+            self.assertIn("第五段内容啊。", parts[-1])
+
+
+class TestRegexMode(unittest.TestCase):
+    """``split_mode="regex"``（出厂默认）：与内置 segmented_reply 对齐。"""
+
+    def setUp(self) -> None:
+        segmented.clear_caches()
+
+    def test_samples_regex_mode(self):
+        config = regex_cfg()
+        for name, text in SAMPLES.items():
+            self.assertEqual(
+                segmented.split_text(text, config), EXPECTED_LINES[name], msg=f"样例 {name}"
+            )
+
+    def test_default_regex_is_line_based(self):
+        # [^\n] 明确排除换行 → 每个换行行独立成段
+        self.assertEqual(
+            segmented.split_text("想吃啥？\n我随便。\n那吃面吧。", regex_cfg()),
+            ["想吃啥？", "我随便。", "那吃面吧。"],
+        )
+
+    def test_unpunctuated_long_line_stays_whole(self):
+        self.assertEqual(segmented.split_text(SAMPLES["D"], regex_cfg()), [SAMPLES["D"]])
+
+    def test_min_segment_chars_is_ignored(self):
+        # 1 个字的段照样独立（正则已经决定怎么切）
+        self.assertEqual(segmented.split_text("好\n嗯\n行", regex_cfg(min_segment_chars=99)),
+                         ["好", "嗯", "行"])
+
+    def test_matches_builtin_on_real_machine_regex(self):
+        """真机同款正则下，我们的输出必须和内置逐段一致。"""
+        for text in (SAMPLES["A"], SAMPLES["B"], SAMPLES["C"], SAMPLES["E"]):
+            ours = segmented.split_text(text, regex_cfg(regex=REAL_MACHINE_REGEX))
+            theirs = builtin_split(text.replace("\r\n", "\n").replace("\r", "\n"), REAL_MACHINE_REGEX)
+            self.assertEqual(ours, theirs, msg=text)
+
+    def test_matches_builtin_default_regex_too(self):
+        for text in (SAMPLES["A"], SAMPLES["C"]):
+            ours = segmented.split_text(text, regex_cfg(regex=BUILTIN_DEFAULT_REGEX))
+            theirs = builtin_split(text, BUILTIN_DEFAULT_REGEX)
+            self.assertEqual(ours, theirs, msg=text)
+
+    def test_no_match_keeps_whole_text(self):
+        # 正则能编译但一段都没匹配到 → 整条不切（内置此时也是原样保留）
+        self.assertEqual(segmented.split_text("abc", regex_cfg(regex="QQQ")), ["abc"])
+
+    def test_broken_regex_falls_back_to_chars(self):
+        warnings: list[tuple[str, str]] = []
+        config = regex_cfg(regex="(", split_chars=segmented.DEFAULT_SPLIT_CHARS)
+        parts = segmented.split_text(SAMPLES["A"], config, on_error=lambda p, e: warnings.append((p, str(e))))
+        self.assertEqual(parts, EXPECTED_LINES["A"])
+        self.assertEqual(len(warnings), 1, "只警告一次")
+
+    def test_broken_regex_warns_only_once_across_calls(self):
+        warnings: list[str] = []
+        config = regex_cfg(regex="[")
+        for _ in range(5):
+            segmented.split_text(SAMPLES["A"], config, on_error=lambda p, e: warnings.append(p))
+        self.assertEqual(len(warnings), 1)
+
+    def test_clear_caches_allows_warning_again(self):
+        warnings: list[str] = []
+        config = regex_cfg(regex="(")
+        segmented.split_text(SAMPLES["A"], config, on_error=lambda p, e: warnings.append(p))
+        segmented.clear_caches()
+        segmented.split_text(SAMPLES["A"], config, on_error=lambda p, e: warnings.append(p))
+        self.assertEqual(len(warnings), 2)
+
+    def test_on_error_failure_never_propagates(self):
+        def boom(_pattern, _exc):
+            raise RuntimeError("记日志炸了")
+
+        self.assertEqual(
+            segmented.split_text(SAMPLES["A"], regex_cfg(regex="("), on_error=boom),
+            EXPECTED_LINES["A"],
+        )
+
+    def test_validate_regex_helper(self):
+        self.assertTrue(segmented.validate_regex(segmented.DEFAULT_REGEX))
+        self.assertFalse(segmented.validate_regex("("))
+
+    def test_capture_groups_are_flattened(self):
+        # 用户写了捕获组 → findall 会给元组；我们要能拼回字符串而不是崩
+        parts = segmented.split_text("a1 b2", regex_cfg(regex=r"([a-z])(\d)"))
+        self.assertEqual(parts, ["a1", "b2"])
 
 
 # ======================================================================
@@ -989,13 +1196,19 @@ class TestSchemaAndWhitelist(unittest.TestCase):
             {
                 "enable", "typing_chars_per_second", "reading_chars_per_second",
                 "pre_min_seconds", "pre_max_seconds", "min_seconds", "max_seconds",
-                "jitter", "max_segments", "max_total_seconds", "split_chars",
+                "jitter", "max_segments", "max_total_seconds",
+                "split_mode", "regex", "split_chars",
                 "min_segment_chars", "count_incoming_chars",
             },
         )
         self.assertIs(jitter["enable"]["default"], False)
         self.assertEqual(jitter["pre_max_seconds"]["default"], 15.0)
         self.assertEqual(jitter["max_total_seconds"]["default"], 30.0)
+        self.assertEqual(jitter["split_mode"]["default"], "regex")
+        self.assertEqual(jitter["regex"]["default"], segmented.DEFAULT_REGEX)
+        self.assertIn("[^\\n]", jitter["regex"]["default"])  # 行边界靠 [^\n]
+        self.assertIn("\n", jitter["split_chars"]["default"])  # 真换行，不是字面量
+        self.assertNotIn("\\n", jitter["split_chars"]["default"])
 
         typing_items = schema["typing_indicator"]["items"]
         self.assertEqual(

@@ -260,6 +260,9 @@ class ReplyGate(Star):
         self._delay_cfg = DelayConfig.from_raw(raw.get("reply_delay"))
         # 分段回复的时间模型（先读再打 + 段间抖动）；默认关闭
         self._seg_cfg = segmented.SegmentedJitterConfig.from_raw(raw.get("segmented_jitter"))
+        if self._seg_cfg.enable and self._seg_cfg.split_mode == "regex":
+            # 存配置时就预编译一次：正则写坏能立刻在日志里看到（只报一次）
+            segmented.validate_regex(self._seg_cfg.regex, self._regex_warning)
         # 「正在输入」：默认关闭。重建实例会清掉「该会话不支持」的记忆——配置改过就重试一次，
         # 这是想要的：用户可能正是去开了 NapCat 的开关才回来改配置的。
         self._typing = typing_mod.TypingIndicator(
@@ -1202,7 +1205,7 @@ class ReplyGate(Star):
             return False, 0.0
 
         # ★零副作用：enable=false 时上面的调用方根本不会进来（这个函数里也不读配置之外的东西）
-        segments = segmented.split_text(text, self._seg_cfg)
+        segments = segmented.split_text(text, self._seg_cfg, on_error=self._regex_warning)
         if not segments:
             return False, 0.0
 
@@ -1268,6 +1271,16 @@ class ReplyGate(Star):
         return waited
 
     # ---- 「正在输入」 --------------------------------------------------
+    @staticmethod
+    def _regex_warning(pattern: str, exc: Exception) -> None:
+        """``segmented_jitter.regex`` 编译失败：退回 chars 模式，**只报一次**。"""
+        logger.warning(
+            "[%s] segmented_jitter.regex 编译失败，已退回 chars 模式切分：%r（%s）",
+            PLUGIN_NAME,
+            pattern,
+            exc,
+        )
+
     def _typing_sender(self, event: AstrMessageEvent):
         """返回一个 sender(target) 协程函数（把 event 绑进去，内核不碰 astrbot 对象）。"""
 

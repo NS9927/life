@@ -53,12 +53,27 @@ AstrBot 内置确实能分段、也能给段间加**随机**间隔（已核对 4
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+import re
+from typing import Any, Callable, Mapping, Sequence
 
 from . import coerce
 
 DEFAULT_SPLIT_CHARS = "。！？!?\n…；;"
-"""在这些字符**之后**切分（标点保留在前一段末尾）。"""
+"""``chars`` 模式：在这些字符**之后**切分（标点保留在前一段末尾）。"""
+
+DEFAULT_SPLIT_MODE = "regex"
+"""切分模式。``regex`` = 和内置 `platform_settings.segmented_reply` 同款做法。"""
+
+DEFAULT_REGEX = r"[^\n]*?[。！？!?…；;]+|[^\n]+"
+"""``regex`` 模式的默认表达式（对照内置的 ``.*?[。？！~…]+|.+$``，见模块 docstring）：
+
+- ``[^\\n]*?[。！？!?…；;]+``：每行里按标点切，**不会跨行**（``[^\\n]`` 明确排除换行）
+- ``[^\\n]+``：没有标点的行整行成一段
+
+于是「每个换行行单独成段、无标点的长行整体成段、不产生空段」三条同时成立。
+匹配时用 ``re.DOTALL | re.MULTILINE``（与内置同款 flags），所以用户写 ``.+$`` 也是按行。
+⚠️ 别在表达式里加捕获组（``re.findall`` 会返回元组）；真要加，本模块会把元组拼回字符串。
+"""
 
 FLOOR_RATIO = 0.3
 """``max_total_seconds`` 压缩后每项的保底比例：
@@ -95,16 +110,22 @@ class SegmentedJitterConfig:
     jitter: float = 0.25
     """抖动比例：实际 = base × uniform(1-jitter, 1+jitter)。0 = 不抖。"""
     max_segments: int = 4
-    """最多切几段，超出的并进最后一段。"""
+    """最多切几段（``chars`` 模式；``regex`` 模式只在标点边界上收，见 ``_cap_segments``）。"""
     max_total_seconds: float = 30.0
     """整条回复的总耗时上限（含第 1 段之前），超了等比压缩。0 = 不限制。
 
     它是第二道闸：``pre_max_seconds`` 管单次等待，这个管整条回复的总时长
     （长回复 + 多段时防止把事件挂到一分钟以上）。"""
+    split_mode: str = DEFAULT_SPLIT_MODE
+    """切分模式：``regex``（默认，内置同款）/ ``chars``（按 ``split_chars`` 逐字符切）。"""
+    regex: str = DEFAULT_REGEX
+    """``regex`` 模式用的表达式；编译失败 → 退回 ``chars`` 并只记一次 warning。"""
     split_chars: str = DEFAULT_SPLIT_CHARS
-    """在这些字符之后切分（保留标点）。"""
+    """``chars`` 模式：在这些字符之后切分（保留标点）。换行永远算边界。"""
     min_segment_chars: int = 6
-    """太短的段不单独发，并进相邻段。"""
+    """``chars`` 模式：太短的段并进相邻段。**换行切出来的段豁免**。
+
+    ``regex`` 模式**不看这一项**（正则已经决定怎么切，短行照样独立成段）。"""
     count_incoming_chars: bool = True
     """是否把入站消息字数算进「阅读」时间。关掉 = 只按回复长度算。"""
 
@@ -131,6 +152,13 @@ class SegmentedJitterConfig:
         if not isinstance(split_chars, str) or not split_chars:
             split_chars = DEFAULT_SPLIT_CHARS
 
+        split_mode = str(data.get("split_mode") or DEFAULT_SPLIT_MODE).strip().lower()
+        if split_mode not in ("regex", "chars"):
+            split_mode = DEFAULT_SPLIT_MODE  # 写坏 → 回到默认的正则模式
+        regex = data.get("regex")
+        if not isinstance(regex, str) or not regex.strip():
+            regex = DEFAULT_REGEX
+
         return cls(
             enable=coerce.as_bool(data.get("enable"), False),
             # 速度给个正的下限，避免除零；写 0 视为「快得没有延迟」
@@ -147,6 +175,8 @@ class SegmentedJitterConfig:
             jitter=max(0.0, min(1.0, coerce.as_float(data.get("jitter"), 0.25))),
             max_segments=max(1, coerce.as_int(data.get("max_segments"), 4)),
             max_total_seconds=max(0.0, coerce.as_float(data.get("max_total_seconds"), 30.0)),
+            split_mode=split_mode,
+            regex=regex,
             split_chars=split_chars,
             min_segment_chars=max(0, coerce.as_int(data.get("min_segment_chars"), 6)),
             count_incoming_chars=coerce.as_bool(data.get("count_incoming_chars"), True),
@@ -156,69 +186,239 @@ class SegmentedJitterConfig:
 # ----------------------------------------------------------------------
 # 切分
 # ----------------------------------------------------------------------
-def split_text(text: str, config: SegmentedJitterConfig) -> list[str]:
-    """按 ``split_chars`` 把回复切成多段（标点保留在前一段末尾）。
+LITERAL_NEWLINE = "\\n"
+"""配置里被转义成「反斜杠 + n」两个字符的换行（面板/写回可能这么写）。"""
 
-    规则（顺序固定）：
+_REGEX_CACHE: dict[str, "re.Pattern[str] | None"] = {}
+"""已编译的正则（None = 编译失败过）。"""
+_WARNED_REGEX: set[str] = set()
+"""已经报过 warning 的坏正则——**只报一次**，别每条回复刷屏。"""
 
-    1. 整段先 ``strip()``（首尾空白本来也看不见）；空/纯空白 → ``[]``
-    2. 在 ``split_chars`` 里的字符**之后**切开，字符本身留在前一段
-    3. 太短的段（``< min_segment_chars``，按 strip 后长度算）并进**前**一段；
-       第一段太短就并进后一段——不让「嗯。」单独占一条消息
-    4. 段数超过 ``max_segments`` → 前 ``max_segments-1`` 段照发，
-       剩下的**全部并进最后一段**（宁可最后一段长一点，也不静默丢内容）
 
-    返回的每段都是原文的连续片段，``"".join(结果) == text.strip()``——
-    不增删改任何字符（除了整体首尾空白）。
-    没有可切分字符时返回单段（调用方据此「原样放行」）。
+def clear_caches() -> None:
+    """清掉正则编译缓存与「已警告」记录（单测用）。"""
+    _REGEX_CACHE.clear()
+    _WARNED_REGEX.clear()
+
+
+def validate_regex(
+    pattern: str, on_error: Callable[[str, Exception], None] | None = None
+) -> bool:
+    """预编译一次正则。返回能不能用——配置保存时也能提前发现写坏。"""
+    return _compile_regex(pattern, on_error) is not None
+
+
+def _compile_regex(
+    pattern: str, on_error: Callable[[str, Exception], None] | None
+) -> "re.Pattern[str] | None":
+    """编译正则；失败 → 记一次 warning 并返回 None（调用方退回 chars）。"""
+    if pattern in _REGEX_CACHE:
+        return _REGEX_CACHE[pattern]
+    try:
+        compiled = re.compile(pattern, re.DOTALL | re.MULTILINE)
+    except re.error as exc:
+        if pattern not in _WARNED_REGEX:
+            _WARNED_REGEX.add(pattern)
+            if on_error is not None:
+                try:
+                    on_error(pattern, exc)
+                except Exception:  # 记日志失败也绝不能影响回复
+                    pass
+        _REGEX_CACHE[pattern] = None
+        return None
+    _REGEX_CACHE[pattern] = compiled
+    return compiled
+
+
+def _effective_split_chars(split_chars: str) -> set[str]:
+    """真正参与切分的字符集合（换行永远算，字面量配置里的 ``\\`` / ``n`` 不算）。"""
+    chars = set(split_chars or "")
+    if LITERAL_NEWLINE in (split_chars or ""):
+        # 配置被写成了字面量 "\\n"：别把反斜杠和字母 n 当成切分符，
+        # 它们只是「换行」的另一种写法（_normalize_newlines 会把它还原成真换行）
+        chars.discard("\\")
+        chars.discard("n")
+    chars.add("\n")  # ★换行必切：内置 regex 也是每个换行行当一段
+    return chars
+
+
+def _normalize_newlines(text: str, split_chars: str) -> str:
+    """把各种「换行」统一成 ``\\n``。
+
+    - ``\\r\\n``（Windows）、单独的 ``\\r``（老 Mac）→ ``\\n``
+    - 配置里是字面量 ``\\n`` 时，文本里的两字符 ``\\n`` 也还原成真换行
+      （真机配置可能被面板/写回改写，代码要兜住）
+    """
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    if LITERAL_NEWLINE in (split_chars or ""):
+        normalized = normalized.replace(LITERAL_NEWLINE, "\n")
+    return normalized
+
+
+def split_text(
+    text: str,
+    config: SegmentedJitterConfig,
+    *,
+    on_error: Callable[[str, Exception], None] | None = None,
+) -> list[str]:
+    """把回复切成多段。**换行必切**（与内置 regex 行为一致）。
+
+    ``split_mode="regex"``（默认）：用 ``config.regex`` 匹配切段，
+    做法与内置 ``platform_settings.segmented_reply`` 对齐
+    （``re.findall`` + ``re.DOTALL | re.MULTILINE`` + 逐段 ``strip`` + 丢空段）：
+
+    - 匹配出来的段**不再走 ``min_segment_chars`` 合并**（正则已经决定怎么切，
+      所以「换行行只有 1~2 个字」照样独立成段）
+    - 正则编译失败 → 记一次 warning，退回 ``chars`` 模式
+    - 正则能编译但一段都没匹配到 → 整条不切（内置此时也是原样保留）
+
+    ``split_mode="chars"``：按 ``split_chars`` 逐字符切，
+    ``min_segment_chars`` 合并短段、``max_segments`` 收口；换行边界豁免合并。
+
+    两种模式共同的保证：**每个换行行都会单独成段、不产生空段**。
     """
     cleaned = (text or "").strip()
     if not cleaned:
         return []
-    if not config.split_chars:
-        return [cleaned]
 
-    pieces: list[str] = []
+    if config.split_mode == "chars":
+        return _split_by_chars(cleaned, config)
+
+    pieces = _split_by_regex(cleaned, config.regex, on_error)
+    if pieces is None:  # 正则编译失败 → 退回 chars
+        return _split_by_chars(cleaned, config)
+    pieces = _cap_segments(pieces, config.max_segments)
+    return [part for part, _ in pieces]
+
+
+def _split_by_regex(
+    text: str,
+    pattern: str,
+    on_error: Callable[[str, Exception], None] | None = None,
+) -> list[tuple[str, bool]] | None:
+    """正则切分。返回 ``None`` 表示正则编译失败（调用方退回 chars）。
+
+    ``hard`` = 这一段与下一段之间隔着换行（正则没匹配到的换行会被跳过，
+    正好用来判断「行边界」）。
+    """
+    compiled = _compile_regex(pattern, on_error)
+    if compiled is None:
+        return None
+
+    matches = list(compiled.finditer(text))
+    if not matches:
+        return [(text, False)]  # 一点都没匹配上 → 整条不切（内置同款行为）
+
+    pieces: list[tuple[str, bool]] = []
+    for index, match in enumerate(matches):
+        part = match.group(0)
+        if isinstance(part, tuple):  # 正则里写了捕获组：把组拼回字符串
+            part = "".join(item or "" for item in part)
+        part = (part or "").strip()
+        if not part:  # 空段/纯空白段丢掉（内置也是 `if seg: append`）
+            continue
+        if index + 1 < len(matches):
+            gap = text[match.end() : matches[index + 1].start()]
+        else:
+            gap = ""
+        pieces.append((part, "\n" in gap))
+    if not pieces:
+        return [(text, False)]
+    return pieces
+
+
+def _split_by_chars(text: str, config: SegmentedJitterConfig) -> list[str]:
+    """``chars`` 模式：按字符切 + 合并短段 + 段数上限。换行是硬边界。"""
+    if not config.split_chars:
+        return [text]
+
+    normalized = _normalize_newlines(text, config.split_chars)
+    chars = _effective_split_chars(config.split_chars)
+
+    # （文本, 是否以换行结束）。换行本身不进正文（内置的 regex 也不含换行），
+    # 只把「这一段后面有换行」记在 hard 上。
+    pieces: list[tuple[str, bool]] = []
     buffer = ""
-    for char in cleaned:
+    for char in normalized:
+        if char == "\n":
+            if buffer:
+                pieces.append((buffer, False))
+                buffer = ""
+            if pieces:  # 换行 = 硬边界，标记在**上一段**上；连续空行在这里被吸收
+                pieces[-1] = (pieces[-1][0], True)
+            continue
         buffer += char
-        if char in config.split_chars:
-            pieces.append(buffer)
+        if char in chars:  # 标点：留在这段末尾并收尾
+            pieces.append((buffer, False))
             buffer = ""
     if buffer:
-        pieces.append(buffer)
+        pieces.append((buffer, False))
     if not pieces:
-        return [cleaned]
+        return [text]
 
     pieces = _merge_short(pieces, config.min_segment_chars)
-    return _cap_segments(pieces, config.max_segments)
+    pieces = _cap_segments(pieces, config.max_segments)
+    return [part for part, _ in pieces]
 
 
-def _merge_short(pieces: list[str], min_chars: int) -> list[str]:
-    """把过短的段并进相邻段（当前段太短就并进前一段；首段太短就并进后一段）。"""
+def _merge_short(pieces: list[tuple[str, bool]], min_chars: int) -> list[tuple[str, bool]]:
+    """把过短的段并进相邻段——**但换行边界两边不合并**（``chars`` 模式专用）。
+
+    ``hard`` 表示这一段后面跟着换行：它和后面那段之间是硬边界，
+    所以「1~5 个字的换行行」必须原样保留（真机反馈：LLM 换行后的行常常很短，
+    被合并回去就看起来「换行不分段」了）。
+
+    ``regex`` 模式不走这里（正则自己决定怎么切）。
+    """
     if min_chars <= 0:
         return list(pieces)
 
-    merged: list[str] = []
-    for piece in pieces:
-        if merged and len(piece.strip()) < min_chars:
-            merged[-1] = merged[-1] + piece  # 当前段太短 → 并进前一段
+    merged: list[tuple[str, bool]] = []
+    for part, hard in pieces:
+        if (
+            merged
+            and len(part.strip()) < min_chars
+            and not merged[-1][1]  # 与前一段之间是软边界（前一段不以换行结束）
+        ):
+            prev_text, _ = merged[-1]
+            merged[-1] = (prev_text + part, hard)  # 并进前一段，边界标记跟当前段走
         else:
-            merged.append(piece)
+            merged.append((part, hard))
 
-    # 第一段过短：往后并（可能连续几次）
-    while len(merged) > 1 and len(merged[0].strip()) < min_chars:
-        merged[1] = merged[0] + merged[1]
+    # 第一段过短：只有当它与后一段之间是软边界时才往后并
+    while len(merged) > 1 and len(merged[0][0].strip()) < min_chars and not merged[0][1]:
+        merged[1] = (merged[0][0] + merged[1][0], merged[1][1])
         merged.pop(0)
     return merged
 
 
-def _cap_segments(pieces: list[str], max_segments: int) -> list[str]:
-    """段数上限：超出的并进最后一段。"""
+def _cap_segments(
+    pieces: list[tuple[str, bool]], max_segments: int
+) -> list[tuple[str, bool]]:
+    """段数上限。
+
+    - **没有换行**（单行）：沿用「多出来的并进最后一段」的老语义
+    - **有换行**：只在软（标点）边界上合并，**行与行绝不合并**——
+      换行必切，和内置 regex 每行一段的行为对齐
+    """
     limit = max(1, int(max_segments))
     if len(pieces) <= limit:
         return list(pieces)
-    return pieces[: limit - 1] + ["".join(pieces[limit - 1 :])]
+
+    if not any(hard for _, hard in pieces):
+        head = pieces[: limit - 1]
+        tail = "".join(part for part, _ in pieces[limit - 1 :])
+        return head + [(tail, pieces[-1][1])]
+
+    out = list(pieces)
+    index = 0
+    while len(out) > limit and index < len(out) - 1:
+        if out[index][1]:  # 这个边界是换行 → 不许并
+            index += 1
+            continue
+        out[index] = (out[index][0] + out[index + 1][0], out[index + 1][1])
+        out.pop(index + 1)
+    return out
 
 
 # ----------------------------------------------------------------------

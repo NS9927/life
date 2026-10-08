@@ -356,13 +356,23 @@
         "type": "float",
         "default": 30.0
       },
+      "split_mode": {
+        "description": "切分模式。regex = 用正则匹配切段（默认，与 AstrBot 内置 segmented_reply 同款做法，换行行自然独立成段）；chars = 按下面的切分字符逐个切。regex 模式下 min_segment_chars 不生效",
+        "type": "string",
+        "default": "regex"
+      },
+      "regex": {
+        "description": "regex 模式的表达式（按 DOTALL|MULTILINE 匹配）。默认 [^\\n]*?[。！？!?…；;]+|[^\\n]+ —— 每行按标点切、没有标点的行整行成段、绝不产生空段。写坏了自动退回 chars 模式并记一条 warning。别用捕获组",
+        "type": "string",
+        "default": "[^\\n]*?[。！？!?…；;]+|[^\\n]+"
+      },
       "split_chars": {
-        "description": "在这些字符之后切分（标点保留在前一段末尾）；\\n 表示换行",
+        "description": "chars 模式的切分字符（在这些字符之后切分，标点保留在前一段末尾）；\\n 表示换行（真换行和字面量 \\\\n 都认）。换行永远是硬边界",
         "type": "string",
         "default": "。！？!?\n…；;"
       },
       "min_segment_chars": {
-        "description": "太短的段不单独发，并进相邻段",
+        "description": "chars 模式：太短的段并进相邻段。★换行切出来的段豁免（1 个字也独立成段）。regex 模式不看这一项",
         "type": "int",
         "default": 6
       },
