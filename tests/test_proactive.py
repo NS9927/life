@@ -718,6 +718,46 @@ class FakeMsgObj:
         self.raw_message = None
 
 
+class FakePersonaManager:
+    """假人格管理器：签名照 ``PersonaManager``（``core/persona_mgr.py:83/68``）。
+
+    ``with_resolve=False`` / ``with_default=False`` 会把对应方法置成 None，
+    用来验证「API 缺失时的退化路径」。
+    """
+
+    def __init__(
+        self,
+        prompt: str = "你是猫娘。",
+        default_prompt: str = "默认人格。",
+        *,
+        raises: Exception | None = None,
+        with_resolve: bool = True,
+        with_default: bool = True,
+    ) -> None:
+        self.prompt = prompt
+        self.default_prompt = default_prompt
+        self.raises = raises
+        self.calls: list[tuple] = []
+        if not with_resolve:
+            self.resolve_selected_persona = None  # type: ignore[assignment]
+        if not with_default:
+            self.get_default_persona_v3 = None  # type: ignore[assignment]
+
+    async def resolve_selected_persona(
+        self, *, umo, conversation_persona_id, platform_name, provider_settings=None
+    ):
+        self.calls.append(("resolve", umo, conversation_persona_id, platform_name))
+        if self.raises is not None:
+            raise self.raises
+        return ("pid", {"prompt": self.prompt} if self.prompt else None, None, False)
+
+    async def get_default_persona_v3(self, umo=None):
+        self.calls.append(("default", umo))
+        if self.raises is not None:
+            raise self.raises
+        return {"prompt": self.default_prompt} if self.default_prompt else None
+
+
 class FakeEvent:
     def __init__(self, *, umo: str = UMO, sender: str = "2001", text: str = "在吗") -> None:
         self.unified_msg_origin = umo
@@ -976,14 +1016,117 @@ class TestWiringHappyPath(WiringTestBase):
 
         call = provider.calls[0]
         self.assertEqual(call["prompt"], "说句话")
-        self.assertEqual(call["system_prompt"], "你是猫娘")
+        # ★system_prompt 不再可能是 None：人格（若有）+ 额外人设 + 硬格式约束
+        self.assertTrue(call["system_prompt"].startswith("你是猫娘"))
+        self.assertIn("输出格式硬约束", call["system_prompt"])
         self.assertEqual(call["contexts"], [{"role": "user", "content": "今天好累"}])
 
-    async def test_empty_system_prompt_becomes_none(self):
+    async def test_system_prompt_is_never_none_and_always_has_hard_rules(self):
+        """真机根因回归测试：空 system_prompt 会让请求里零 system 消息。"""
         provider = FakeProvider()
         plugin = self.build(provider, proactive=proactive_conf(system_prompt=""))
         await plugin._maybe_proactive_check()
-        self.assertIsNone(provider.calls[0]["system_prompt"])
+        system_prompt = provider.calls[0]["system_prompt"]
+        self.assertIsNotNone(system_prompt)
+        self.assertIn(plugin_main.PROACTIVE_HARD_RULES, system_prompt)
+        # 硬约束必须点明「不许 Markdown / 不许话术模板」
+        self.assertIn("Markdown", system_prompt)
+        self.assertIn("话术模板", system_prompt)
+
+    async def test_persona_is_injected_into_proactive_system_prompt(self):
+        provider = FakeProvider()
+        plugin = self.build(provider, proactive=proactive_conf(system_prompt=""))
+        self.ctx.persona_manager = FakePersonaManager(prompt="你是傲娇猫娘，说话带喵。")
+        await plugin._maybe_proactive_check()
+
+        system_prompt = provider.calls[0]["system_prompt"]
+        self.assertTrue(system_prompt.startswith("你是傲娇猫娘，说话带喵。"))
+        self.assertIn("输出格式硬约束", system_prompt)
+        self.assertTrue(
+            any("已注入人格" in line for line in LOGGER.messages("info")), LOGGER.messages()
+        )
+
+    async def test_persona_falls_back_to_default_getter(self):
+        provider = FakeProvider()
+        plugin = self.build(provider, proactive=proactive_conf())
+        self.ctx.persona_manager = FakePersonaManager(
+            prompt="", default_prompt="默认人格文本"
+        )
+        await plugin._maybe_proactive_check()
+        self.assertTrue(provider.calls[0]["system_prompt"].startswith("默认人格文本"))
+
+    async def test_persona_errors_never_break_generation(self):
+        for manager in (
+            FakePersonaManager(raises=RuntimeError("人格炸了")),
+            FakePersonaManager(with_resolve=False, with_default=False),
+            None,
+        ):
+            provider = FakeProvider()
+            plugin = self.build(provider, proactive=proactive_conf())
+            self.ctx.persona_manager = manager
+            await plugin._maybe_proactive_check()  # 不许抛
+            self.assertIsNotNone(provider.calls[0]["system_prompt"])
+            self.assertIn("输出格式硬约束", provider.calls[0]["system_prompt"])
+            await plugin.terminate()
+
+    async def test_proactive_text_is_deformatted_before_sending(self):
+        """兜底去格式化：主动开口绕开流水线，必须在发送前自己清洗一遍（真机 ``**`` 事故）。"""
+        provider = FakeProvider("**群聊版：** 1. 开黑吗 2. 直接复制发")
+        plugin = self.build(
+            provider,
+            proactive=proactive_conf(),
+            format_guard={
+                "enable": True,
+                "strip_markdown": True,
+                "flatten_lists": True,
+                "list_joiner": "，",
+                "max_chars": 0,
+            },
+        )
+        await plugin._maybe_proactive_check()
+        sent = [c.chain[0].text for _, c in self.ctx.sent]
+        self.assertEqual(len(sent), 1)
+        self.assertNotIn("**", sent[0], "加粗标记必须去掉")
+        self.assertEqual(sent[0], "群聊版： 开黑吗，直接复制发")
+
+    async def test_proactive_text_untouched_when_format_guard_off(self):
+        provider = FakeProvider("**群聊版：** 原样发")
+        plugin = self.build(provider, proactive=proactive_conf())
+        await plugin._maybe_proactive_check()
+        self.assertEqual([c.chain[0].text for _, c in self.ctx.sent], ["**群聊版：** 原样发"])
+
+    async def test_incoming_message_records_last_user_at(self):
+        """★真机 bug 回归：note_user_message 以前没有任何生产调用点。"""
+        plugin = self.build(FakeProvider(), proactive=proactive_conf())
+        await plugin.gate(FakeEvent(text="在吗"))  # 默认 umo=UMO，正是白名单里的那个
+        state = plugin._proactive_states[UMO]
+        # datetime.now().timestamp() 与 time.time() 精度不同，给点容差
+        self.assertAlmostEqual(state.last_user_at, time.time(), delta=5.0)
+        self.assertGreater(state.last_user_at, 0.0)
+        self.assertEqual(state.unanswered, 0, "收到用户消息要把「未回复」清零")
+
+    async def test_incoming_message_not_recorded_when_disabled(self):
+        plugin = self.build(FakeProvider(), proactive=proactive_conf(enable=False))
+        await plugin.gate(FakeEvent(text="在吗"))
+        self.assertEqual(plugin._proactive_states, {})
+
+    async def test_min_idle_now_actually_blocks(self):
+        """收到消息后马上主动开口 → insufficient_idle（真机 18:28 聊、18:36:51 开口的 bug）。"""
+        plugin = self.build(
+            FakeProvider(), proactive=proactive_conf(min_idle_minutes=30, session_list=[GROUP_UMO])
+        )
+        await plugin.gate(FakeEvent(umo=GROUP_UMO, text="在吗"))
+        await plugin._maybe_proactive_check()
+        self.assertEqual(self.ctx.sent, [], "刚聊过 30 分钟内不许主动开口")
+        self.assertTrue(any("insufficient_idle" in line for line in LOGGER.messages()))
+
+    async def test_min_idle_does_not_block_when_disabled(self):
+        plugin = self.build(
+            FakeProvider(), proactive=proactive_conf(min_idle_minutes=0, session_list=[GROUP_UMO])
+        )
+        await plugin.gate(FakeEvent(umo=GROUP_UMO, text="在吗"))
+        await plugin._maybe_proactive_check()
+        self.assertEqual(len(self.ctx.sent), 1)
 
     async def test_max_unanswered_stops_the_second_attempt(self):
         plugin = self.build(FakeProvider(), proactive=proactive_conf(max_unanswered=1))

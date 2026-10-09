@@ -16,32 +16,37 @@ from dataclasses import dataclass, field
 
 
 class FakeLogger:
-    """记录所有日志，方便断言「已读不回」真的打了日志。"""
+    """记录所有日志，方便断言「已读不回」真的打了日志。
+
+    ★签名要和真实 logger 一致：真 logger 就是 python logging
+    （``debug(msg, *args, **kwargs)``），生产代码里会用 ``exc_info=True``。
+    桩不接受 kwargs 会把一次日志调用变成 TypeError，再被上层 except 吞掉 → 测试被带偏。
+    """
 
     def __init__(self) -> None:
         self.records: list[tuple[str, str]] = []
 
-    def _log(self, level: str, msg, *args) -> None:
+    def _log(self, level: str, msg, *args, **kwargs) -> None:
         try:
             text = msg % args if args else str(msg)
         except Exception:
             text = f"{msg} {args}"
         self.records.append((level, text))
 
-    def debug(self, msg, *args) -> None:
-        self._log("debug", msg, *args)
+    def debug(self, msg, *args, **kwargs) -> None:
+        self._log("debug", msg, *args, **kwargs)
 
-    def info(self, msg, *args) -> None:
-        self._log("info", msg, *args)
+    def info(self, msg, *args, **kwargs) -> None:
+        self._log("info", msg, *args, **kwargs)
 
-    def warning(self, msg, *args) -> None:
-        self._log("warning", msg, *args)
+    def warning(self, msg, *args, **kwargs) -> None:
+        self._log("warning", msg, *args, **kwargs)
 
-    def error(self, msg, *args) -> None:
-        self._log("error", msg, *args)
+    def error(self, msg, *args, **kwargs) -> None:
+        self._log("error", msg, *args, **kwargs)
 
-    def exception(self, msg, *args) -> None:
-        self._log("exception", msg, *args)
+    def exception(self, msg, *args, **kwargs) -> None:
+        self._log("exception", msg, *args, **kwargs)
 
     def messages(self, level: str | None = None) -> list[str]:
         return [text for lvl, text in self.records if level is None or lvl == level]

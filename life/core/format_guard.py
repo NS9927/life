@@ -321,14 +321,23 @@ def _flatten_inline_markers(line: str, joiner: str, stats: FormatStats) -> str:
     真机案例 ``1. 先做A。2. 再做B。`` 是一整行：行首那个由整行规则处理，
     后面那个 ``2.`` 必须在这里处理掉，否则会原样留在正文里。
     ``prev`` 是句末标点 → 直接去掉标记（``先做A。再做B。``，不丢标点）；
+    ``prev`` 是空格 → 看空格前的字符：是标点就保留空格（``： 1. 甲`` → ``： 甲``），
     否则补 ``joiner``（``甲 2. 乙`` → ``甲，乙``）。
     """
 
     def repl(match: re.Match) -> str:
         stats.list_items += 1
         prev = match.group("prev")
-        # ★把 prev 原样还回去：它是标点（要保留标点）或一个空格（用 joiner 替换掉）
-        return prev if prev in ANY_PUNCT else joiner
+        if prev in ANY_PUNCT:
+            return prev  # ★标点原样还回去（要保留标点）
+        # prev 是空格：再看空格前面那个字符是不是标点——
+        # 「群聊版： 1. 开黑吗」里的冒号是标点，不该被换成逗号（否则变成「：，」）
+        cursor = match.start() - 1
+        while cursor >= 0 and match.string[cursor] == " ":
+            cursor -= 1
+        if cursor >= 0 and match.string[cursor] in ANY_PUNCT:
+            return " "
+        return joiner
 
     return _INLINE_BULLET_RE.sub(repl, _INLINE_ORDERED_RE.sub(repl, line))
 

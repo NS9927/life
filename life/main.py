@@ -40,6 +40,7 @@ import asyncio
 import random
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -749,15 +750,30 @@ class ReplyGate(Star):
             )
             return ""
 
-        prompt, system_prompt = proactive.compose_prompt(cfg)
+        # ★主动开口没有事件、不走流水线 → 人格必须**自己注入**，否则请求里零 system 消息，
+        #   模型会退回通用助手模式（真机 18:37 的事故，见 PROACTIVE_HARD_RULES 的注释）。
+        persona_text = await self._resolve_persona_text(umo)
+        prompt, extra_system = proactive.compose_prompt(cfg)
+        system_prompt = "\n\n".join(
+            part
+            for part in (persona_text, extra_system, PROACTIVE_HARD_RULES)
+            if part
+        )
+        if persona_text:
+            logger.info(
+                "[%s] 主动开口：已注入人格 %d 字 + 硬格式约束 session=%s",
+                PLUGIN_NAME,
+                len(persona_text),
+                umo,
+            )
         try:
             # ★必须有超时：provider 卡住时绝不能把后台循环挂在那儿。
             #   真机教训见 docs/真机反馈与根因分析.md 第十节（livingmemory 每条 60 秒）。
             response = await asyncio.wait_for(
                 provider.text_chat(
                     prompt=prompt,
-                    # 空的人设提示传 None，让 AstrBot 用它自己的默认人设
-                    system_prompt=system_prompt or None,
+                    # 绝不传 None：人格 + 硬格式约束拼好的这一段必须发出去
+                    system_prompt=system_prompt,
                     contexts=self._recent_contexts(umo),
                 ),
                 timeout=cfg.llm_timeout_seconds,
@@ -775,9 +791,88 @@ class ReplyGate(Star):
             return ""
         return proactive.extract_text(response)
 
+    async def _resolve_persona_text(self, umo: str) -> str:
+        """取该会话生效的人格提示文本；**取不到返回空串，绝不抛**。
+
+        API（已按源码核对，AstrBot 4.28.2）：
+
+        - ``context.persona_manager``：``core/star/context.py:141/161``
+        - ``PersonaManager.resolve_selected_persona(umo=…, conversation_persona_id=…,
+          platform_name=…, provider_settings=…)`` → ``core/persona_mgr.py:83-142``，
+          返回 ``(persona_id, persona, force_applied, use_webchat_default)``
+        - 人格文本 = ``persona["prompt"]``（``Personality`` 是 TypedDict，
+          定义在 ``core/db/po.py:592-598``）；流水线就是在
+          ``core/astr_main_agent.py:543-557`` 拿它拼 ``# Persona Instructions``
+        - 兜底 ``PersonaManager.get_default_persona_v3(umo)`` → ``core/persona_mgr.py:68-81``
+          （永远不会空，最差是 ``DEFAULT_PERSONALITY``）
+        """
+        try:
+            manager = getattr(self.context, "persona_manager", None)
+            if manager is None:
+                return ""
+            persona = None
+            resolver = getattr(manager, "resolve_selected_persona", None)
+            if callable(resolver):
+                try:
+                    _pid, persona, _force, _web = await resolver(
+                        umo=umo,
+                        conversation_persona_id=await self._conversation_persona_id(umo),
+                        # 只在 webchat 特例里用到；从 umo 前缀取，取不到就空串
+                        platform_name=str(umo).split(":", 1)[0] if umo else "",
+                        provider_settings=None,
+                    )
+                except Exception:
+                    logger.debug(
+                        "[%s] resolve_selected_persona 失败，退化用默认人格", PLUGIN_NAME
+                    )
+                    persona = None
+            if not persona:
+                fallback = getattr(manager, "get_default_persona_v3", None)
+                if callable(fallback):
+                    persona = await fallback(umo)
+            return self._persona_prompt(persona)
+        except Exception:
+            logger.debug("[%s] 取会话人格失败，主动开口将不带人格", PLUGIN_NAME, exc_info=True)
+            return ""
+
+    async def _conversation_persona_id(self, umo: str) -> str | None:
+        """当前对话绑定的人格 id（没有就 None，由 persona_manager 用配置默认值）。
+
+        ``ConversationManager.get_curr_conversation_id`` / ``get_conversation``
+        都是 async（``core/conversation_mgr.py:174/190``）。
+        """
+        try:
+            manager = getattr(self.context, "conversation_manager", None)
+            if manager is None:
+                return None
+            conversation_id = await manager.get_curr_conversation_id(umo)
+            if not conversation_id:
+                return None
+            conversation = await manager.get_conversation(umo, conversation_id)
+            value = getattr(conversation, "persona_id", None)
+            return value or None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _persona_prompt(persona) -> str:
+        """从 Personality（dict，键 ``prompt``）或 v2 Persona（``system_prompt``）取文本。"""
+        if persona is None:
+            return ""
+        for key in ("prompt", "system_prompt", "content"):
+            if isinstance(persona, Mapping):
+                value = persona.get(key)
+            else:
+                value = getattr(persona, key, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
     async def _send_proactive(self, umo: str, text: str, cfg) -> bool:
         """分段发送。返回是否**至少发出去一段**（失败只记日志，不抛给循环）。"""
-        cleaned = (text or "").strip()
+        # ★兜底去格式化：主动开口绕开流水线，`_clean_reply_text` 只接在流水线上，
+        #   所以这里必须自己过一遍（真机那条带 ``**`` 的消息就是这么漏出去的）。
+        cleaned = (self._clean_reply_text(text or "", umo) or "").strip()
         if len(cleaned) < PROACTIVE_MIN_CHARS:
             logger.info(
                 "[%s] 主动开口内容过短已丢弃 session=%s（%d 字）", PLUGIN_NAME, umo, len(cleaned)
