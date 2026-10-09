@@ -409,6 +409,37 @@
       }
     }
   },
+  "format_guard": {
+    "description": "去格式化：把模型输出里的 Markdown / 编号清单拍平成「群里说人话」的样子（QQ 不渲染 Markdown，星号会原样显示；多行清单还会被切成 7~8 条消息）。★默认关闭。只删标记、绝不丢内容；处理顺序在分段之前",
+    "type": "object",
+    "items": {
+      "enable": {
+        "description": "启用去格式化（★默认关闭）",
+        "type": "bool",
+        "default": false
+      },
+      "strip_markdown": {
+        "description": "去掉 **粗体** *斜体* __下划线__ ~~删除线~~ `行内代码` ```代码块``` # 标题 > 引用 --- 分隔线（只删标记，保留文字）",
+        "type": "bool",
+        "default": true
+      },
+      "flatten_lists": {
+        "description": "把 1. / 1、/ 1) / ① / - / * / • / · 这些列表项拍平成一句话；表格 | a | b | 拍平成 a，b",
+        "type": "bool",
+        "default": true
+      },
+      "list_joiner": {
+        "description": "列表项之间的连接符。默认逗号更像说话；前一项本来以标点结尾时不会再补",
+        "type": "string",
+        "default": "，"
+      },
+      "max_chars": {
+        "description": "0 = 不限；>0 时超长正文截断到句末（可选，默认关闭）。这是唯一会丢内容的开关",
+        "type": "int",
+        "default": 0
+      }
+    }
+  },
   "debug_timing": {
     "description": "延迟埋点：把每条被处理消息的时序（平台发出时间 → 我们开始处理 → 判定 → 进入发送 → 延时结束）写进 plugin_data/life/timing.jsonl，用来定位「放行之后到真正发送」之间的滞后。默认关闭，开了才会写文件",
     "type": "bool",

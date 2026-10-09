@@ -35,7 +35,9 @@ from tests._astrbot_stub import install  # noqa: E402
 
 LOGGER = install()  # 必须在 import main 之前（幂等）
 
-from core import proactive  # noqa: E402
+# ★走 life.core：main 用的是 life.core.proactive，顶层 core.* 是另一个模块对象，
+#   monkeypatch（parse_timeline 的 spy）会打不中。
+from life.core import proactive  # noqa: E402
 from life import main as plugin_main  # noqa: E402
 from life import webapi  # noqa: E402
 

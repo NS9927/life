@@ -60,6 +60,7 @@ SETTINGS_KEYS = frozenset(
         "proactive",
         "segmented_jitter",
         "typing_indicator",
+        "format_guard",
         "debug_timing",
     }
 )

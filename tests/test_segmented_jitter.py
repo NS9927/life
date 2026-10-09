@@ -30,8 +30,10 @@ from tests._astrbot_stub import FakePlain, install  # noqa: E402
 
 LOGGER = install()  # 必须在 import main 之前（幂等）
 
-from core import segmented  # noqa: E402
-from core import typing_indicator as typing  # noqa: E402
+# ★必须走 life.core：main 用的是 life.core.segmented / life.core.typing_indicator，
+#   用顶层 core.* 会拿到**另一个模块对象**，monkeypatch 就打不中（曾经的假阳性测试）。
+from life.core import segmented  # noqa: E402
+from life.core import typing_indicator as typing  # noqa: E402
 from life import main as plugin_main  # noqa: E402
 from life import webapi  # noqa: E402
 

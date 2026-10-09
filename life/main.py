@@ -50,7 +50,7 @@ from astrbot.api.star import Context, Star, register
 from astrbot.core.message.components import Plain
 from astrbot.core.message.message_event_result import MessageChain
 
-from .core import batch as batch_mod, classify, coerce, proactive, segmented
+from .core import batch as batch_mod, classify, coerce, format_guard, proactive, segmented
 from .core import queue as queue_mod, schedule, timing as timing_mod
 from .core import typing_indicator as typing_mod
 from .core.delay import DelayConfig, reply_delay_seconds
@@ -110,6 +110,24 @@ FOLLOWUP_EXTRA_KEY = "life_segmented_followup"
 
 FOLLOWUP_HOOK_TIMEOUT_SECONDS = 30.0
 """等 ``after_message_sent`` 的上限：超时走兜底发送（先确认第一条真的出去了）。"""
+
+PROACTIVE_HARD_RULES = """【输出格式硬约束（QQ 聊天，必须遵守）】
+- QQ 不渲染 Markdown：禁止出现 **加粗**、# 标题、- 列表、1. 编号、表格、```代码块```，也不要星号、井号、反引号本身。
+- 要分点就用逗号或「、」把几件事串成一句话，不要换行编号。
+- 一条消息最多 3 句，每句不超过 30 字。
+- 不要产出「可复制的话术模板」：不给「群聊版/私聊版」多版本草案，不教人改文案，不写「直接复制发」「你可以…」这类顾问口吻。
+- 如果有人让你帮写话术：只给一句话，不给版本、不给建议。
+- 就当一个普通人在群里说话，别解释自己在做什么。"""
+"""主动开口的硬格式约束（模块级常量，随每次主动请求一起发出去）。
+
+为什么要写死在代码里：主动开口**不走消息流水线**（没有事件可依附），流水线里那套
+「人格注入 + 格式要求」（``core/astr_main_agent.py:528-557`` 的 ``# Persona Instructions``、
+``begin_dialogs``）全都用不上。真机 18:37 的事故就是 ``system_prompt`` 为空
+→ ``openai_source.py:969 if system_prompt:`` 为假 → 请求里**零 system 消息**
+→ 模型退回通用助手模式，把 ``prompt_template`` 当成「帮我写一段开黑邀约」，
+产出「群聊版/私聊版 + 直接复制发」加 Markdown 加粗，再由本插件原样发进群。
+所以这里自己带上人格与格式约束。
+"""
 
 # 埋点挂载在事件对象上的键（优先用 AstrBot 的 extras，退化成私有属性）
 TIMING_EXTRA_KEY = "life_timing"
@@ -246,6 +264,8 @@ class ReplyGate(Star):
         # 「正在输入」状态：默认关闭（_apply_config 重建；unsupported 记忆也在实例上）
         self._typing = typing_mod.TypingIndicator(logger=logger)
         self._typing_logged = ""
+        # 去格式化：默认关闭
+        self._format_cfg = format_guard.FormatGuardConfig()
         # 方案 B：后续段的补发任务 + 两次补发都失败时暂存的正文（等 flush 重试）
         self._followup_tasks: set[asyncio.Task] = set()
         self._unsent_tails: dict[str, str] = {}
@@ -297,6 +317,8 @@ class ReplyGate(Star):
         self._delay_cfg = DelayConfig.from_raw(raw.get("reply_delay"))
         # 分段回复的时间模型（先读再打 + 段间抖动）；默认关闭
         self._seg_cfg = segmented.SegmentedJitterConfig.from_raw(raw.get("segmented_jitter"))
+        # 去格式化（Markdown/列表拍平）：默认关闭；在切段之前跑
+        self._format_cfg = format_guard.FormatGuardConfig.from_raw(raw.get("format_guard"))
         if self._seg_cfg.enable and self._seg_cfg.split_mode == "regex":
             # 存配置时就预编译一次：正则写坏能立刻在日志里看到（只报一次）
             segmented.validate_regex(self._seg_cfg.regex, self._regex_warning)
@@ -833,12 +855,20 @@ class ReplyGate(Star):
         # 主动开口：只在启用时记录（关闭时零副作用）。
         # - _proactive_seen：裸群号 / QQ 号白名单条目要靠它才找得到真实会话
         # - _note_recent：主动开口「参考最近的聊天」
+        # - note_user_message：★空闲门槛（min_idle_minutes）唯一的喂数据点。
+        #   2026-10-08 真机 bug：这个调用以前根本不存在 → last_user_at 恒为 0
+        #   → proactive.py 里那段空闲判定整段被跳过（群里 18:28 还在聊，18:36:51 就主动开口了）。
         # 放在闸门判定之前：被已读不回的消息同样是「最近聊过什么」的一部分。
         if self._proactive_cfg.active and proactive.match_session(
             umo, self._proactive_cfg.session_list
         ):
             self._proactive_seen.add(umo)
             self._note_recent(umo, event.get_message_str())
+            state = self._proactive_states.get(umo)
+            if state is None:
+                state = proactive.DailyState(umo=umo)
+                self._proactive_states[umo] = state
+            state.note_user_message(datetime.now())
 
         kind = classify.classify(
             is_private=event.is_private_chat(),
@@ -1158,6 +1188,15 @@ class ReplyGate(Star):
         if pending is not None:
             pending["t_decorate"] = entered
 
+        # ① 去格式化（Markdown / 列表拍平）：**与分段解耦**——只开 format_guard 也要生效。
+        #    只处理「整条都是纯文本」的结果；有图片/@ 时按现有规则整条不切，这里也不动。
+        if self._format_cfg.enable:
+            try:
+                self._clean_result_chain(event, umo)
+            except Exception:
+                # ★去格式化坏掉绝不能让回复出问题：内容原样留着
+                logger.exception("[%s] 去格式化异常，本条按原文发送 session=%s", PLUGIN_NAME, umo)
+
         # 延迟是可选的，但会话冷却的计时不受它开关影响：
         # 关了延迟也得记「刚回过一条」，否则冷却永远不触发。
         delay = 0.0
@@ -1216,26 +1255,64 @@ class ReplyGate(Star):
         self._finish_timing(pending, delay=delay, ready=time.time())
 
     # ------------------------------------------------------------------
+    # 去格式化（Markdown / 列表拍平）
+    # ------------------------------------------------------------------
+    def _clean_result_chain(self, event: AstrMessageEvent, umo: str) -> bool:
+        """把结果链里的纯文本正文去格式化（写回链里）。返回是否动过。
+
+        只处理**整条都是 Plain** 的结果：有图片/@/转发等非文本段时按现有规则
+        整条不切，这里也一律不动（不改变行为语义）。
+        """
+        result = event.get_result()
+        chain = getattr(result, "chain", None)
+        if not chain or not all(isinstance(comp, Plain) for comp in chain):
+            return False
+        raw_text = "".join(getattr(comp, "text", "") or "" for comp in chain)
+        if not raw_text.strip():
+            return False
+        cleaned = self._clean_reply_text(raw_text, umo)
+        if cleaned == raw_text:
+            return False
+        chain[:] = [Plain(cleaned)]
+        return True
+
+    def _clean_reply_text(self, text: str, umo: str) -> str:
+        """把回复正文里的 Markdown/列表拍平。**失败一律退回原文**。
+
+        ★``enable=false`` 时零副作用：连 ``format_guard.clean`` 都不调用。
+        只删标记、不丢内容（细节见 core/format_guard.py 的模块 docstring）。
+        """
+        if not self._format_cfg.enable:
+            return text
+        try:
+            cleaned, stats = format_guard.clean(text, self._format_cfg)
+        except Exception:
+            # ★去格式化坏掉绝不能让回复出问题：用原文继续
+            logger.warning("[%s] 去格式化失败，本条按原文发送 session=%s", PLUGIN_NAME, umo)
+            return text
+        logger.info("[%s] 去格式化 %s | %s", PLUGIN_NAME, umo, stats.log_line())
+        return cleaned
+
+    # ------------------------------------------------------------------
     # 分段回复的时间模型（打字抖动）
     # ------------------------------------------------------------------
     async def _apply_typing_model(
         self, event: AstrMessageEvent, target: typing_mod.TypingTarget
     ) -> tuple[bool, float]:
-        """在钩子里实现「先读再打 + 段间抖动」。
+        """在钩子里实现「去格式化 → 切段 → 先读再打 + 段间抖动」。
 
         返回 ``(是否接管, 实际等待秒数)``；没接管（结果不是纯文本 / 切不出多段 /
         空内容）时返回 ``(False, 0.0)``，由调用方退回扁平的 reply_delay。
 
+        **顺序**：拿到回复文本 → **去格式化**（format_guard）→ 切段 → 打字时间模型。
+        去格式化把 Markdown/列表拍平后换行变少，段数会自然从 7~8 降到 2~3。
+
         **不重不漏的保证**（这是本功能最容易出错的地方）：
 
         - 结果链**全是 Plain** 才动手（有图片 / at 等非文本段 → 整条不切，保守）；
-        - 先按字数算好 ``TimingPlan`` 并打日志，**然后立刻把结果链的文本改成「最后一段」**，
-          再去 sleep + 发送前面的段。也就是说：**改写只发生一次，且在任何 sleep/send 之前**。
-        - 前 N-1 段我们自己 ``context.send_message`` 发；最后一段**只**存在于 result 里，
-          由流水线在钩子返回后正常发出。
-        - 中途发失败：只记日志并停止发送剩余段，**result 里已经是最后一段**，
-          流水线照发 → 已发出去的段不会被重复，正文也不会整条重发（绝不会出现
-          「前几段发过 + 完整正文又发一遍」）。
+        - 第一段留在 result 里由流水线发（引用/@ 只会加在它上面），其余段在
+          ``after_message_sent`` 之后按抖动间隔补发（见 _schedule_followups）；
+        - 去格式化改了文本就把新文本写回 result（单段也要写回，否则用户还是看到星号）。
         """
         result = event.get_result()
         chain = getattr(result, "chain", None)
@@ -1243,11 +1320,14 @@ class ReplyGate(Star):
             # 有非文本段（图片/at/转发…）：整条不切，交给扁平延迟
             return False, 0.0
 
-        text = "".join(getattr(comp, "text", "") or "" for comp in chain)
-        if not text.strip():
+        raw_text = "".join(getattr(comp, "text", "") or "" for comp in chain)
+        if not raw_text.strip():
             return False, 0.0
 
-        # ★零副作用：enable=false 时上面的调用方根本不会进来（这个函数里也不读配置之外的东西）
+        # 去格式化已经在上一步（apply_reply_delay）做过：这里拿到的是清洗后的正文
+        text = raw_text
+
+        # ② 切段
         segments = segmented.split_text(text, self._seg_cfg, on_error=self._regex_warning)
         if not segments:
             return False, 0.0
