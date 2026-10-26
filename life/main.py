@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import re
 import time
 from collections import deque
 from collections.abc import Mapping
@@ -67,6 +68,60 @@ PLUGIN_VERSION = "v0.4.0"
 GATE_PRIORITY = 996
 
 FLUSH_TICK_SECONDS = 30
+
+_LEADING_EMOJI_RE = re.compile(
+    r"^(["
+    r"\U0001F000-\U0001FAFF"
+    r"\u2600-\u27BF"
+    r"\u2B00-\u2BFF"
+    r"\uFE0F\u200D"
+    r"\U0001F3FB-\U0001F3FF"
+    r"]+)\s+(?=\S)",
+    re.DOTALL,
+)
+
+
+def split_proactive_parts(text: str, max_chars: int, max_parts: int) -> list[str]:
+    """主动开口的切段：先按换行切（换行 = 两条消息），再按长度兜底。
+
+    普通回复走流水线的 segmented_jitter，会按换行切；主动开口不走流水线，
+    只能在这里补。emoji + 空格也先归一成换行（见 split_leading_emoji）。
+    """
+    text = split_leading_emoji(text or "")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return []
+    parts: list[str] = []
+    for line in lines:
+        if len(line) <= max_chars:
+            parts.append(line)
+        else:
+            parts.extend(
+                proactive.split_message(
+                    line, max_chars=max_chars, max_parts=max_parts
+                )
+            )
+    keep = max(1, int(max_parts))
+    if len(parts) > keep:
+        parts = parts[: keep - 1] + ["\n".join(parts[keep - 1:])]
+    return parts
+
+
+def split_leading_emoji(text: str) -> str:
+    """把「emoji 组合 + 空白 + 正文」改成「emoji 组合 + 换行 + 正文」。
+
+    模型经常把「🤣👉 你的呢」写成一行，导致分段逻辑不切；统一成两行后，
+    打字模型会把它拆成两条消息。只在开头是 emoji、且后面还有正文时动手。
+    """
+    if not text:
+        return text
+    match = _LEADING_EMOJI_RE.match(text)
+    if not match:
+        return text
+    rest = text[match.end():].lstrip()
+    if not rest:
+        return text
+    return match.group(1) + "\n" + rest
 
 # ----------------------------------------------------------------------
 # 主动开口（PROACTIVE）
@@ -879,10 +934,10 @@ class ReplyGate(Star):
             )
             return False
 
-        parts = proactive.split_message(
+        parts = split_proactive_parts(
             cleaned,
-            max_chars=PROACTIVE_SEGMENT_MAX_CHARS,
-            max_parts=PROACTIVE_SEGMENT_MAX_PARTS,
+            PROACTIVE_SEGMENT_MAX_CHARS,
+            PROACTIVE_SEGMENT_MAX_PARTS,
         )
         if not parts:
             logger.info("[%s] 主动开口内容为空已丢弃 session=%s", PLUGIN_NAME, umo)
@@ -1418,6 +1473,12 @@ class ReplyGate(Star):
         raw_text = "".join(getattr(comp, "text", "") or "" for comp in chain)
         if not raw_text.strip():
             return False, 0.0
+
+        # 模型有时把「🤣👉 正文」写成一行：统一改成两行，交给分段拆成两条
+        normalized = split_leading_emoji(raw_text)
+        if normalized != raw_text:
+            chain[:] = [Plain(normalized)]
+            raw_text = normalized
 
         # 去格式化已经在上一步（apply_reply_delay）做过：这里拿到的是清洗后的正文
         text = raw_text
